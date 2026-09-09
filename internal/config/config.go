@@ -13,6 +13,7 @@ type Config struct {
 	AutoMigrate  bool
 	DefaultLimit int
 	MaxLimit     int
+	CORSOrigin   string
 
 	DBHost     string
 	DBPort     string
@@ -29,6 +30,7 @@ func Load() Config {
 		AutoMigrate:  env("AUTO_MIGRATE", "true") == "true",
 		DefaultLimit: envInt("DEFAULT_LIMIT", 10),
 		MaxLimit:     envInt("MAX_LIMIT", 100),
+		CORSOrigin:   env("CORS_ORIGIN", "*"),
 
 		DBHost:     env("DB_HOST", "127.0.0.1"),
 		DBPort:     env("DB_PORT", "3306"),

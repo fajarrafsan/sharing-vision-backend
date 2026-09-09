@@ -43,7 +43,7 @@ func main() {
 
 	server := &http.Server{
 		Addr:         ":" + cfg.AppPort,
-		Handler:      router.New(articleHandler, healthHandler),
+		Handler:      router.New(articleHandler, healthHandler, cfg.CORSOrigin),
 		ReadTimeout:  15 * time.Second,
 		WriteTimeout: 30 * time.Second,
 		IdleTimeout:  60 * time.Second,

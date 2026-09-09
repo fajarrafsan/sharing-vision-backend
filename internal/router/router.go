@@ -8,7 +8,7 @@ import (
 	"sharing-vision-backend/internal/handler"
 )
 
-func New(articles *handler.ArticleHandler, health *handler.HealthHandler) http.Handler {
+func New(articles *handler.ArticleHandler, health *handler.HealthHandler, allowedOrigin string) http.Handler {
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("GET /health", health.Live)
@@ -28,7 +28,24 @@ func New(articles *handler.ArticleHandler, health *handler.HealthHandler) http.H
 	mux.HandleFunc("DELETE /article/{id}", articles.Delete)
 	mux.HandleFunc("POST /article/{id}/delete", articles.Delete)
 
-	return logRequest(mux)
+	return logRequest(cors(mux, allowedOrigin))
+}
+
+func cors(next http.Handler, allowedOrigin string) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Access-Control-Allow-Origin", allowedOrigin)
+		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Accept")
+		w.Header().Set("Access-Control-Max-Age", "86400")
+		w.Header().Set("Vary", "Origin")
+
+		if r.Method == http.MethodOptions {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+
+		next.ServeHTTP(w, r)
+	})
 }
 
 func logRequest(next http.Handler) http.Handler {

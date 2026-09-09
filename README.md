@@ -116,6 +116,16 @@ golang-migrate, dan godotenv.
 
 Semua lewat environment, daftar lengkapnya ada di `.env.example`.
 
+`CORS_ORIGIN` bawaannya `*`, jadi frontend yang berjalan di origin mana pun bisa
+memanggil API ini dari browser. Untuk penggunaan sungguhan, isi dengan origin
+frontend saja.
+
+Frontend-nya ada di
+[sharing-vision-frontend](https://github.com/fajarrafsan/sharing-vision-frontend)
+dan sudah dideploy ke Vercel. Karena backend ini dijalankan lokal, versi Vercel
+tersebut memanggil `http://localhost:8080`, sehingga aplikasinya bekerja penuh
+selama backend ini menyala di komputer yang sama dengan browsernya.
+
 ## Catatan
 
 Tiga hal yang saya putuskan sendiri karena soalnya kurang konsisten:
