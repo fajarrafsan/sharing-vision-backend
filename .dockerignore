@@ -1,0 +1,9 @@
+.git
+.env
+bin
+docs
+*.exe
+*.log
+README.md
+Makefile
+docker-compose.yml
