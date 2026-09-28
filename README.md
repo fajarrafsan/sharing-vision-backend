@@ -334,9 +334,9 @@ frontend saja, dipisahkan koma bila lebih dari satu.
 ## Catatan
 
 Endpoint versi awal (`/article/...`) sudah diganti seluruhnya oleh `/api/v1`.
-Frontend lama,
-[sharing-vision-frontend](https://github.com/fajarrafsan/sharing-vision-frontend),
-masih memanggil endpoint lama dan perlu disesuaikan.
+Frontend-nya ada di
+[warta-frontend](https://github.com/fajarrafsan/warta-frontend) dan sudah
+memakai API ini.
 
 Access token sengaja tidak dicek ke database di setiap permintaan supaya
 ringan. Akibatnya perubahan role atau penonaktifan akun baru terasa setelah
