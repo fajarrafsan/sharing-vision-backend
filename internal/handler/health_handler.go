@@ -1,10 +1,12 @@
 package handler
 
 import (
+	"context"
 	"database/sql"
 	"net/http"
+	"time"
 
-	"sharing-vision-backend/internal/response"
+	"warta/internal/response"
 )
 
 type HealthHandler struct {
@@ -20,7 +22,10 @@ func (h *HealthHandler) Live(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *HealthHandler) Ready(w http.ResponseWriter, r *http.Request) {
-	if err := h.db.Ping(); err != nil {
+	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
+	defer cancel()
+
+	if err := h.db.PingContext(ctx); err != nil {
 		response.JSON(w, http.StatusServiceUnavailable, map[string]string{
 			"status":   "unavailable",
 			"database": "tidak terjangkau",

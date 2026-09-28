@@ -2,70 +2,98 @@ package main
 
 import (
 	"context"
-	"log"
+	"errors"
+	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
 	"time"
 
-	"sharing-vision-backend/internal/config"
-	"sharing-vision-backend/internal/database"
-	"sharing-vision-backend/internal/handler"
-	"sharing-vision-backend/internal/repository"
-	"sharing-vision-backend/internal/router"
-	"sharing-vision-backend/internal/service"
+	"golang.org/x/crypto/bcrypt"
+
+	"warta/internal/app"
+	"warta/internal/auth"
+	"warta/internal/config"
+	"warta/internal/database"
+	"warta/internal/logging"
 )
 
 func main() {
-	cfg := config.Load()
+	if err := run(); err != nil {
+		slog.Error("service berhenti", "error", err)
+		os.Exit(1)
+	}
+}
 
-	if cfg.AutoMigrate {
-		if err := database.CreateDatabase(cfg.ServerDSN(), cfg.DBName); err != nil {
-			log.Fatal("gagal membuat database: ", err)
-		}
-		if err := database.MigrateUp(cfg.DSN(), cfg.DBName); err != nil {
-			log.Fatal("gagal menjalankan migrasi: ", err)
-		}
-		log.Println("migrasi database selesai")
+func run() error {
+	cfg, err := config.Load()
+	if err != nil {
+		return err
 	}
 
-	db, err := database.Connect(cfg.DSN())
+	slog.SetDefault(logging.New(os.Stdout, cfg.LogFormat, cfg.LogLevel))
+
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	if cfg.AutoMigrate {
+		if err := database.CreateDatabase(ctx, cfg.ServerDSN(), cfg.DBName); err != nil {
+			return errors.Join(errors.New("gagal membuat database"), err)
+		}
+		if err := database.MigrateUp(cfg.MigrationDSN(), cfg.DBName); err != nil {
+			return errors.Join(errors.New("gagal menjalankan migrasi"), err)
+		}
+		slog.Info("migrasi database selesai")
+	}
+
+	db, err := database.Connect(ctx, cfg.DSN())
 	if err != nil {
-		log.Fatal("gagal terhubung ke database: ", err)
+		return errors.Join(errors.New("gagal terhubung ke database"), err)
 	}
 	defer db.Close()
 
-	articleRepository := repository.NewArticleRepository(db)
-	articleService := service.NewArticleService(articleRepository, cfg.DefaultLimit, cfg.MaxLimit)
-	articleHandler := handler.NewArticleHandler(articleService)
-	healthHandler := handler.NewHealthHandler(db)
+	a := app.New(cfg, db, auth.BcryptHasher{Cost: bcrypt.DefaultCost})
+
+	if cfg.AdminEmail != "" {
+		if err := a.Auth.EnsureAdmin(ctx, cfg.AdminName, cfg.AdminEmail, cfg.AdminPassword); err != nil {
+			return errors.Join(errors.New("gagal menyiapkan akun admin"), err)
+		}
+		slog.Info("akun admin siap", "email", cfg.AdminEmail)
+	}
+
+	go a.CleanupTokens(ctx, time.Hour)
 
 	server := &http.Server{
-		Addr:         ":" + cfg.AppPort,
-		Handler:      router.New(articleHandler, healthHandler, cfg.CORSOrigin),
-		ReadTimeout:  15 * time.Second,
-		WriteTimeout: 30 * time.Second,
-		IdleTimeout:  60 * time.Second,
+		Addr:              ":" + cfg.AppPort,
+		Handler:           a.Handler,
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       15 * time.Second,
+		WriteTimeout:      30 * time.Second,
+		IdleTimeout:       60 * time.Second,
 	}
 
+	serverErr := make(chan error, 1)
 	go func() {
-		log.Println("service berjalan di http://localhost:" + cfg.AppPort)
-		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			log.Fatal("server berhenti: ", err)
-		}
+		slog.Info("service berjalan", "addr", "http://localhost:"+cfg.AppPort, "docs", "http://localhost:"+cfg.AppPort+"/docs")
+		serverErr <- server.ListenAndServe()
 	}()
 
-	stop := make(chan os.Signal, 1)
-	signal.Notify(stop, os.Interrupt, syscall.SIGTERM)
-	<-stop
+	select {
+	case err := <-serverErr:
+		if !errors.Is(err, http.ErrServerClosed) {
+			return err
+		}
+	case <-ctx.Done():
+	}
 
-	log.Println("mematikan service...")
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	slog.Info("mematikan service...")
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	if err := server.Shutdown(ctx); err != nil {
-		log.Fatal("gagal mematikan service: ", err)
+	if err := server.Shutdown(shutdownCtx); err != nil {
+		return errors.Join(errors.New("gagal mematikan service dengan rapi"), err)
 	}
-	log.Println("service berhenti")
+	slog.Info("service berhenti")
+	return nil
 }

@@ -1,15 +1,15 @@
 services:
   mysql:
     image: mysql:8.0
-    container_name: sharing-vision-mysql
+    container_name: warta-mysql
     restart: unless-stopped
     environment:
       MYSQL_ROOT_PASSWORD: root
-      MYSQL_DATABASE: article
+      MYSQL_DATABASE: warta
     ports:
       - "3306:3306"
     volumes:
-      - mysql_data:/var/lib/mysql
+      - warta_mysql_data:/var/lib/mysql
     healthcheck:
       test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-uroot", "-proot"]
       interval: 10s
@@ -19,6 +19,8 @@ services:
   # container_name sengaja tidak dipakai di sini supaya service ini bisa
   # dijalankan beberapa instance sekaligus:
   #   docker compose up -d --scale api=3
+  # Semua instance memakai JWT_SECRET yang sama, jadi token dari satu instance
+  # berlaku di instance lain. Rate limit dihitung per instance.
   api:
     build: .
     restart: unless-stopped
@@ -28,11 +30,19 @@ services:
     environment:
       APP_PORT: "8080"
       AUTO_MIGRATE: "true"
+      LOG_FORMAT: json
       DB_HOST: mysql
       DB_PORT: "3306"
       DB_USER: root
       DB_PASSWORD: root
-      DB_NAME: article
+      DB_NAME: warta
+      # Nilai bawaan di bawah hanya untuk mencoba di komputer sendiri. Isi
+      # JWT_SECRET, ADMIN_EMAIL, dan ADMIN_PASSWORD lewat .env untuk selebihnya.
+      JWT_SECRET: ${JWT_SECRET:-ganti-dengan-rahasia-acak-minimal-32-karakter}
+      ADMIN_NAME: ${ADMIN_NAME:-Administrator}
+      ADMIN_EMAIL: ${ADMIN_EMAIL:-admin@warta.local}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:-admin12345}
+      CORS_ORIGINS: ${CORS_ORIGINS:-*}
     # Untuk menjalankan beberapa instance sekaligus (docker compose up -d --scale api=3),
     # ganti baris di bawah menjadi rentang: "8080-8082:8080"
     ports:
@@ -44,4 +54,4 @@ services:
       retries: 10
 
 volumes:
-  mysql_data:
+  warta_mysql_data:

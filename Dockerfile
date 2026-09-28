@@ -9,17 +9,17 @@ RUN go mod download
 
 COPY . .
 
-RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /out/article-service ./cmd/api
-RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /out/migrate ./cmd/migrate
+RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /out/warta-api ./cmd/api
+RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /out/warta-migrate ./cmd/migrate
 
 FROM alpine:3.20
 
 RUN apk add --no-cache ca-certificates tzdata && adduser -D -u 10001 app
 
-COPY --from=build /out/article-service /usr/local/bin/article-service
-COPY --from=build /out/migrate /usr/local/bin/migrate
+COPY --from=build /out/warta-api /usr/local/bin/warta-api
+COPY --from=build /out/warta-migrate /usr/local/bin/warta-migrate
 
 USER app
 EXPOSE 8080
 
-ENTRYPOINT ["article-service"]
+ENTRYPOINT ["warta-api"]

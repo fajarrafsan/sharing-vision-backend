@@ -1,44 +1,116 @@
 package validation
 
 import (
-	"sharing-vision-backend/internal/dto"
-	"sharing-vision-backend/internal/model"
+	"fmt"
+
+	"warta/internal/dto"
+	"warta/internal/model"
+)
+
+const (
+	maxTags        = 10
+	maxContentLen  = 100_000
+	maxCommentLen  = 2_000
+	maxDescription = 255
 )
 
 func ValidateArticle(r dto.ArticleRequest) map[string]string {
 	problems := make(map[string]string)
 
-	switch {
-	case r.Title == "":
+	switch n := length(r.Title); {
+	case n == 0:
 		problems["title"] = "title wajib diisi"
-	case len([]rune(r.Title)) < 20:
+	case n < 20:
 		problems["title"] = "title minimal 20 karakter"
-	case len([]rune(r.Title)) > 200:
+	case n > 200:
 		problems["title"] = "title maksimal 200 karakter"
 	}
 
-	switch {
-	case r.Content == "":
+	switch n := length(r.Content); {
+	case n == 0:
 		problems["content"] = "content wajib diisi"
-	case len([]rune(r.Content)) < 200:
+	case n < 200:
 		problems["content"] = "content minimal 200 karakter"
+	case n > maxContentLen:
+		problems["content"] = fmt.Sprintf("content maksimal %d karakter", maxContentLen)
 	}
 
-	switch {
-	case r.Category == "":
-		problems["category"] = "category wajib diisi"
-	case len([]rune(r.Category)) < 3:
-		problems["category"] = "category minimal 3 karakter"
-	case len([]rune(r.Category)) > 100:
-		problems["category"] = "category maksimal 100 karakter"
+	if r.CategoryID <= 0 {
+		problems["category_id"] = "category_id wajib diisi"
+	}
+
+	if len(r.Tags) > maxTags {
+		problems["tags"] = fmt.Sprintf("tags maksimal %d", maxTags)
+	}
+	for _, t := range r.Tags {
+		if msg := tagProblem(t); msg != "" {
+			problems["tags"] = msg
+			break
+		}
 	}
 
 	switch {
 	case r.Status == "":
 		problems["status"] = "status wajib diisi"
-	case r.Status != model.StatusPublish && r.Status != model.StatusDraft && r.Status != model.StatusThrash:
-		problems["status"] = "status harus publish, draft, atau thrash"
+	case !model.ArticleStatus(r.Status).Valid():
+		problems["status"] = "status harus draft, published, atau archived"
 	}
 
 	return problems
+}
+
+func ValidateCategory(r dto.CategoryRequest) map[string]string {
+	problems := make(map[string]string)
+
+	switch n := length(r.Name); {
+	case n == 0:
+		problems["name"] = "name wajib diisi"
+	case n < 3:
+		problems["name"] = "name minimal 3 karakter"
+	case n > 100:
+		problems["name"] = "name maksimal 100 karakter"
+	}
+
+	if length(r.Description) > maxDescription {
+		problems["description"] = fmt.Sprintf("description maksimal %d karakter", maxDescription)
+	}
+
+	return problems
+}
+
+func ValidateTag(r dto.TagRequest) map[string]string {
+	problems := make(map[string]string)
+	if msg := tagProblem(r.Name); msg != "" {
+		problems["name"] = msg
+	}
+	return problems
+}
+
+func ValidateComment(r dto.CommentRequest) map[string]string {
+	problems := make(map[string]string)
+
+	switch n := length(r.Body); {
+	case n == 0:
+		problems["body"] = "body wajib diisi"
+	case n > maxCommentLen:
+		problems["body"] = fmt.Sprintf("body maksimal %d karakter", maxCommentLen)
+	}
+
+	return problems
+}
+
+func tagProblem(name string) string {
+	switch n := length(name); {
+	case n == 0:
+		return "tag tidak boleh kosong"
+	case n < 2:
+		return "tag minimal 2 karakter"
+	case n > 50:
+		return "tag maksimal 50 karakter"
+	}
+	return ""
+}
+
+func length(s string) int {
+	return len([]rune(s))
 }

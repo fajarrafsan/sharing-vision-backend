@@ -1,0 +1,1025 @@
+openapi: 3.0.3
+info:
+  title: Warta API
+  version: 1.0.0
+  description: |
+    REST API untuk platform artikel Warta: akun dan role, kategori, tag,
+    artikel, dan komentar.
+
+    **Autentikasi.** Login atau register menghasilkan `access_token` (JWT,
+    berlaku singkat) dan `refresh_token` (berlaku lebih lama, sekali pakai).
+    Kirim access token di header `Authorization: Bearer <token>`. Saat access
+    token kedaluwarsa, tukar refresh token di `/auth/refresh` untuk mendapat
+    pasangan baru. Refresh token lama langsung tidak berlaku; bila dipakai lagi,
+    semua sesi akun itu dicabut.
+
+    Endpoint publik tetap bisa dipanggil tanpa token. Namun token yang dikirim
+    tapi tidak valid atau kedaluwarsa selalu ditolak dengan 401.
+
+    **Role.** Akun baru selalu `reader` (bisa berkomentar). Admin menaikkannya
+    menjadi `author` (bisa menulis artikel) atau `admin`.
+
+    **Bentuk response.** Sukses: `{"data": ...}`, ditambah `meta` untuk daftar
+    berhalaman. Gagal: `{"error": {"code", "message", "fields"}}`.
+servers:
+  - url: /
+    description: Server yang sedang menyajikan dokumen ini
+
+# Bawaannya token opsional; operasi yang wajib login menimpanya.
+security:
+  - {}
+  - bearerAuth: []
+
+tags:
+  - name: Auth
+    description: Register, login, refresh, dan logout
+  - name: Akun
+    description: Data dan artikel milik pengguna yang sedang login
+  - name: User
+    description: Pengelolaan akun, khusus admin
+  - name: Kategori
+    description: Satu artikel punya tepat satu kategori
+  - name: Tag
+    description: Satu artikel punya paling banyak 10 tag
+  - name: Artikel
+    description: Tulisan dengan status draft, published, atau archived
+  - name: Komentar
+    description: Komentar pembaca pada artikel yang sudah terbit
+  - name: Health
+    description: Pemeriksaan untuk orkestrator dan load balancer
+
+paths:
+  /health:
+    get:
+      operationId: healthLive
+      tags: [Health]
+      summary: Proses service hidup
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string, example: ok }
+  /health/ready:
+    get:
+      operationId: healthReady
+      tags: [Health]
+      summary: Service siap melayani (database terjangkau)
+      responses:
+        "200":
+          description: Siap
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string, example: ok }
+                  database: { type: string, example: terhubung }
+        "503":
+          description: Database tidak terjangkau
+
+  /api/v1/auth/register:
+    post:
+      operationId: register
+      tags: [Auth]
+      summary: Membuat akun baru (role reader)
+      description: Dibatasi per IP, lihat `AUTH_RATE_LIMIT`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/RegisterRequest" }
+      responses:
+        "201":
+          description: Akun dibuat dan langsung login
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TokenEnvelope" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "422": { $ref: "#/components/responses/ValidationFailed" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
+  /api/v1/auth/login:
+    post:
+      operationId: login
+      tags: [Auth]
+      summary: Login dengan email dan password
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/LoginRequest" }
+      responses:
+        "200":
+          description: Berhasil
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TokenEnvelope" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "422": { $ref: "#/components/responses/ValidationFailed" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
+  /api/v1/auth/refresh:
+    post:
+      operationId: refreshToken
+      tags: [Auth]
+      summary: Menukar refresh token dengan pasangan token baru
+      description: |
+        Refresh token lama langsung dicabut. Role di access token baru diambil
+        dari database, jadi perubahan role oleh admin berlaku setelah refresh.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/RefreshRequest" }
+      responses:
+        "200":
+          description: Pasangan token baru
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TokenEnvelope" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
+  /api/v1/auth/logout:
+    post:
+      operationId: logout
+      tags: [Auth]
+      summary: Mencabut refresh token
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/RefreshRequest" }
+      responses:
+        "204": { description: "Berhasil, juga untuk token yang tidak dikenal" }
+        "422": { $ref: "#/components/responses/ValidationFailed" }
+
+  /api/v1/me:
+    get:
+      operationId: getMe
+      tags: [Akun]
+      summary: Data akun sendiri
+      security: [{ bearerAuth: [] }]
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/UserEnvelope" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+    patch:
+      operationId: updateMe
+      tags: [Akun]
+      summary: Mengubah nama
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/UpdateProfileRequest" }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/UserEnvelope" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "422": { $ref: "#/components/responses/ValidationFailed" }
+  /api/v1/me/password:
+    put:
+      operationId: changePassword
+      tags: [Akun]
+      summary: Mengganti password
+      description: Semua refresh token akun ini ikut dicabut.
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ChangePasswordRequest" }
+      responses:
+        "204": { description: Berhasil }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "422": { $ref: "#/components/responses/ValidationFailed" }
+  /api/v1/me/articles:
+    get:
+      operationId: listMyArticles
+      tags: [Akun]
+      summary: Artikel milik sendiri, semua status
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - $ref: "#/components/parameters/Page"
+        - $ref: "#/components/parameters/PerPage"
+        - $ref: "#/components/parameters/Search"
+        - $ref: "#/components/parameters/CategoryFilter"
+        - $ref: "#/components/parameters/TagFilter"
+        - $ref: "#/components/parameters/Sort"
+        - name: status
+          in: query
+          schema: { type: string, enum: [draft, published, archived, all] }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ArticleListEnvelope" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /api/v1/users:
+    get:
+      operationId: listUsers
+      tags: [User]
+      summary: Daftar user
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - $ref: "#/components/parameters/Page"
+        - $ref: "#/components/parameters/PerPage"
+        - name: q
+          in: query
+          description: Cari di nama atau email
+          schema: { type: string }
+        - name: role
+          in: query
+          schema: { $ref: "#/components/schemas/Role" }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items: { $ref: "#/components/schemas/User" }
+                  meta: { $ref: "#/components/schemas/PaginationMeta" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /api/v1/users/{id}:
+    get:
+      operationId: getUser
+      tags: [User]
+      summary: Detail user
+      security: [{ bearerAuth: [] }]
+      parameters: [{ $ref: "#/components/parameters/Id" }]
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/UserEnvelope" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /api/v1/users/{id}/role:
+    patch:
+      operationId: updateUserRole
+      tags: [User]
+      summary: Mengubah role user
+      description: Admin tidak bisa mengubah role akunnya sendiri.
+      security: [{ bearerAuth: [] }]
+      parameters: [{ $ref: "#/components/parameters/Id" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/UpdateRoleRequest" }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/UserEnvelope" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "422": { $ref: "#/components/responses/ValidationFailed" }
+
+  /api/v1/categories:
+    get:
+      operationId: listCategories
+      tags: [Kategori]
+      summary: Semua kategori
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items: { $ref: "#/components/schemas/Category" }
+    post:
+      operationId: createCategory
+      tags: [Kategori]
+      summary: Membuat kategori (admin)
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CategoryRequest" }
+      responses:
+        "201":
+          description: Dibuat
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/CategoryEnvelope" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "422": { $ref: "#/components/responses/ValidationFailed" }
+  /api/v1/categories/{id}:
+    get:
+      operationId: getCategory
+      tags: [Kategori]
+      summary: Detail kategori berdasarkan id atau slug
+      parameters: [{ $ref: "#/components/parameters/IdOrSlug" }]
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/CategoryEnvelope" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    put:
+      operationId: updateCategory
+      tags: [Kategori]
+      summary: Mengubah kategori (admin)
+      description: Slug dibuat ulang bila nama berubah.
+      security: [{ bearerAuth: [] }]
+      parameters: [{ $ref: "#/components/parameters/Id" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CategoryRequest" }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/CategoryEnvelope" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "422": { $ref: "#/components/responses/ValidationFailed" }
+    delete:
+      operationId: deleteCategory
+      tags: [Kategori]
+      summary: Menghapus kategori (admin)
+      security: [{ bearerAuth: [] }]
+      parameters: [{ $ref: "#/components/parameters/Id" }]
+      responses:
+        "204": { description: Dihapus }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409":
+          description: Kategori masih dipakai artikel
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+
+  /api/v1/tags:
+    get:
+      operationId: listTags
+      tags: [Tag]
+      summary: Daftar tag, diurutkan dari yang paling banyak dipakai
+      parameters:
+        - $ref: "#/components/parameters/Page"
+        - $ref: "#/components/parameters/PerPage"
+        - name: q
+          in: query
+          description: Cari di nama tag
+          schema: { type: string }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items: { $ref: "#/components/schemas/Tag" }
+                  meta: { $ref: "#/components/schemas/PaginationMeta" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+    post:
+      operationId: createTag
+      tags: [Tag]
+      summary: Membuat tag (admin)
+      description: Author tidak perlu endpoint ini; tag baru dibuat otomatis saat menulis artikel.
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/TagRequest" }
+      responses:
+        "201":
+          description: Dibuat
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TagEnvelope" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "422": { $ref: "#/components/responses/ValidationFailed" }
+  /api/v1/tags/{id}:
+    put:
+      operationId: updateTag
+      tags: [Tag]
+      summary: Mengganti nama tag (admin)
+      security: [{ bearerAuth: [] }]
+      parameters: [{ $ref: "#/components/parameters/Id" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/TagRequest" }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TagEnvelope" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "422": { $ref: "#/components/responses/ValidationFailed" }
+    delete:
+      operationId: deleteTag
+      tags: [Tag]
+      summary: Menghapus tag dan melepasnya dari semua artikel (admin)
+      security: [{ bearerAuth: [] }]
+      parameters: [{ $ref: "#/components/parameters/Id" }]
+      responses:
+        "204": { description: Dihapus }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /api/v1/articles:
+    get:
+      operationId: listArticles
+      tags: [Artikel]
+      summary: Daftar artikel
+      description: |
+        Tanpa `status`, hanya artikel yang sudah terbit yang tampil. Status lain
+        (`draft`, `archived`, `all`) hanya untuk admin. Daftar berisi cuplikan
+        (`excerpt`), bukan isi lengkap.
+      security: [{}, { bearerAuth: [] }]
+      parameters:
+        - $ref: "#/components/parameters/Page"
+        - $ref: "#/components/parameters/PerPage"
+        - $ref: "#/components/parameters/Search"
+        - $ref: "#/components/parameters/CategoryFilter"
+        - $ref: "#/components/parameters/TagFilter"
+        - name: author
+          in: query
+          description: Id penulis
+          schema: { type: integer, format: int64 }
+        - name: status
+          in: query
+          schema: { type: string, enum: [draft, published, archived, all] }
+        - $ref: "#/components/parameters/Sort"
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ArticleListEnvelope" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+    post:
+      operationId: createArticle
+      tags: [Artikel]
+      summary: Menulis artikel (author atau admin)
+      description: |
+        Slug dibuat dari judul dan dibuat unik. Tag yang belum ada dibuat
+        otomatis; nama tag dirapikan menjadi huruf kecil.
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ArticleRequest" }
+      responses:
+        "201":
+          description: Dibuat
+          headers:
+            Location:
+              schema: { type: string }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ArticleEnvelope" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "413": { $ref: "#/components/responses/PayloadTooLarge" }
+        "422": { $ref: "#/components/responses/ValidationFailed" }
+  /api/v1/articles/{id}:
+    get:
+      operationId: getArticle
+      tags: [Artikel]
+      summary: Detail artikel berdasarkan id atau slug
+      description: |
+        Artikel yang belum terbit hanya terlihat oleh penulisnya dan admin.
+        Bagi yang lain responsnya 404.
+      security: [{}, { bearerAuth: [] }]
+      parameters: [{ $ref: "#/components/parameters/IdOrSlug" }]
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ArticleEnvelope" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    put:
+      operationId: replaceArticle
+      tags: [Artikel]
+      summary: Mengganti seluruh isi artikel (penulis atau admin)
+      description: |
+        Semua field wajib dikirim; `tags` yang tidak dikirim berarti artikel
+        tidak punya tag. Slug mengikuti judul hanya selama artikel belum
+        pernah terbit.
+      security: [{ bearerAuth: [] }]
+      parameters: [{ $ref: "#/components/parameters/Id" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ArticleRequest" }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ArticleEnvelope" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "422": { $ref: "#/components/responses/ValidationFailed" }
+    patch:
+      operationId: patchArticle
+      tags: [Artikel]
+      summary: Mengubah sebagian artikel (penulis atau admin)
+      description: Hanya field yang dikirim yang diubah, misalnya `{"status":"published"}`.
+      security: [{ bearerAuth: [] }]
+      parameters: [{ $ref: "#/components/parameters/Id" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ArticlePatch" }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ArticleEnvelope" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "422": { $ref: "#/components/responses/ValidationFailed" }
+    delete:
+      operationId: deleteArticle
+      tags: [Artikel]
+      summary: Menghapus artikel beserta komentarnya (penulis atau admin)
+      security: [{ bearerAuth: [] }]
+      parameters: [{ $ref: "#/components/parameters/Id" }]
+      responses:
+        "204": { description: Dihapus }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /api/v1/articles/{id}/comments:
+    get:
+      operationId: listComments
+      tags: [Komentar]
+      summary: Komentar sebuah artikel, dari yang terlama
+      security: [{}, { bearerAuth: [] }]
+      parameters:
+        - $ref: "#/components/parameters/Id"
+        - $ref: "#/components/parameters/Page"
+        - $ref: "#/components/parameters/PerPage"
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items: { $ref: "#/components/schemas/Comment" }
+                  meta: { $ref: "#/components/schemas/PaginationMeta" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    post:
+      operationId: createComment
+      tags: [Komentar]
+      summary: Berkomentar (semua role, hanya di artikel yang sudah terbit)
+      security: [{ bearerAuth: [] }]
+      parameters: [{ $ref: "#/components/parameters/Id" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CommentRequest" }
+      responses:
+        "201":
+          description: Dibuat
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/CommentEnvelope" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "422": { $ref: "#/components/responses/ValidationFailed" }
+  /api/v1/comments/{id}:
+    patch:
+      operationId: updateComment
+      tags: [Komentar]
+      summary: Mengubah komentar (hanya penulisnya)
+      security: [{ bearerAuth: [] }]
+      parameters: [{ $ref: "#/components/parameters/Id" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CommentRequest" }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/CommentEnvelope" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "422": { $ref: "#/components/responses/ValidationFailed" }
+    delete:
+      operationId: deleteComment
+      tags: [Komentar]
+      summary: Menghapus komentar (penulisnya atau admin)
+      security: [{ bearerAuth: [] }]
+      parameters: [{ $ref: "#/components/parameters/Id" }]
+      responses:
+        "204": { description: Dihapus }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+
+  parameters:
+    Id:
+      name: id
+      in: path
+      required: true
+      schema: { type: integer, format: int64, minimum: 1 }
+    IdOrSlug:
+      name: id
+      in: path
+      required: true
+      description: Id (angka) atau slug. Slug tidak pernah seluruhnya angka.
+      schema: { type: string }
+    Page:
+      name: page
+      in: query
+      schema: { type: integer, minimum: 1, default: 1 }
+    PerPage:
+      name: per_page
+      in: query
+      description: Nilai di atas `MAX_PER_PAGE` dipangkas.
+      schema: { type: integer, minimum: 1, default: 10 }
+    Search:
+      name: q
+      in: query
+      description: Cari di judul dan isi, tidak peka huruf besar
+      schema: { type: string }
+    CategoryFilter:
+      name: category
+      in: query
+      description: Slug kategori
+      schema: { type: string }
+    TagFilter:
+      name: tag
+      in: query
+      description: Slug tag
+      schema: { type: string }
+    Sort:
+      name: sort
+      in: query
+      schema: { type: string, enum: [newest, oldest, title, updated], default: newest }
+
+  responses:
+    BadRequest:
+      description: Parameter atau body tidak bisa dibaca
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorResponse" }
+    Unauthorized:
+      description: Token tidak ada, tidak valid, atau kedaluwarsa
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorResponse" }
+    Forbidden:
+      description: Role atau kepemilikan tidak mengizinkan aksi ini
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorResponse" }
+    NotFound:
+      description: Tidak ditemukan
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorResponse" }
+    Conflict:
+      description: Bentrok dengan data yang disimpan bersamaan
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorResponse" }
+    PayloadTooLarge:
+      description: Body lebih dari 1 MB
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorResponse" }
+    ValidationFailed:
+      description: Validasi gagal, rinciannya per field di `error.fields`
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorResponse" }
+          example:
+            error:
+              code: validation_failed
+              message: validasi gagal
+              fields:
+                title: title minimal 20 karakter
+    TooManyRequests:
+      description: Terlalu banyak percobaan dari IP yang sama
+      headers:
+        Retry-After:
+          description: Detik sampai boleh mencoba lagi
+          schema: { type: integer }
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorResponse" }
+
+  schemas:
+    ErrorResponse:
+      type: object
+      properties:
+        error:
+          type: object
+          required: [code, message]
+          properties:
+            code:
+              type: string
+              enum:
+                - bad_request
+                - unauthorized
+                - forbidden
+                - not_found
+                - method_not_allowed
+                - conflict
+                - payload_too_large
+                - validation_failed
+                - too_many_requests
+                - internal_error
+            message: { type: string }
+            fields:
+              type: object
+              additionalProperties: { type: string }
+    PaginationMeta:
+      type: object
+      properties:
+        page: { type: integer }
+        per_page: { type: integer }
+        total: { type: integer, format: int64 }
+        total_pages: { type: integer }
+
+    Role:
+      type: string
+      enum: [admin, author, reader]
+    User:
+      type: object
+      properties:
+        id: { type: integer, format: int64 }
+        name: { type: string }
+        email: { type: string, format: email }
+        role: { $ref: "#/components/schemas/Role" }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    Author:
+      type: object
+      properties:
+        id: { type: integer, format: int64 }
+        name: { type: string }
+    TokenPair:
+      type: object
+      properties:
+        access_token: { type: string }
+        token_type: { type: string, example: Bearer }
+        expires_in: { type: integer, description: Umur access token dalam detik }
+        refresh_token: { type: string }
+        user: { $ref: "#/components/schemas/User" }
+
+    Category:
+      type: object
+      properties:
+        id: { type: integer, format: int64 }
+        name: { type: string }
+        slug: { type: string }
+        description: { type: string }
+        article_count: { type: integer, description: Jumlah artikel terbit }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    CategoryRef:
+      type: object
+      properties:
+        id: { type: integer, format: int64 }
+        name: { type: string }
+        slug: { type: string }
+    Tag:
+      type: object
+      properties:
+        id: { type: integer, format: int64 }
+        name: { type: string }
+        slug: { type: string }
+        article_count: { type: integer, description: Jumlah artikel terbit }
+        created_at: { type: string, format: date-time }
+    TagRef:
+      type: object
+      properties:
+        id: { type: integer, format: int64 }
+        name: { type: string }
+        slug: { type: string }
+
+    ArticleStatus:
+      type: string
+      enum: [draft, published, archived]
+    ArticleSummary:
+      type: object
+      properties:
+        id: { type: integer, format: int64 }
+        title: { type: string }
+        slug: { type: string }
+        excerpt: { type: string }
+        status: { $ref: "#/components/schemas/ArticleStatus" }
+        author: { $ref: "#/components/schemas/Author" }
+        category: { $ref: "#/components/schemas/CategoryRef" }
+        tags:
+          type: array
+          items: { $ref: "#/components/schemas/TagRef" }
+        comment_count: { type: integer }
+        published_at:
+          type: string
+          format: date-time
+          nullable: true
+          description: Waktu pertama kali terbit
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    Article:
+      allOf:
+        - $ref: "#/components/schemas/ArticleSummary"
+        - type: object
+          properties:
+            content: { type: string }
+    Comment:
+      type: object
+      properties:
+        id: { type: integer, format: int64 }
+        article_id: { type: integer, format: int64 }
+        body: { type: string }
+        author: { $ref: "#/components/schemas/Author" }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+
+    RegisterRequest:
+      type: object
+      required: [name, email, password]
+      properties:
+        name: { type: string, minLength: 2, maxLength: 100 }
+        email: { type: string, format: email, maxLength: 191 }
+        password: { type: string, minLength: 8, description: Maksimal 72 byte }
+    LoginRequest:
+      type: object
+      required: [email, password]
+      properties:
+        email: { type: string, format: email }
+        password: { type: string }
+    RefreshRequest:
+      type: object
+      required: [refresh_token]
+      properties:
+        refresh_token: { type: string }
+    UpdateProfileRequest:
+      type: object
+      required: [name]
+      properties:
+        name: { type: string, minLength: 2, maxLength: 100 }
+    ChangePasswordRequest:
+      type: object
+      required: [current_password, new_password]
+      properties:
+        current_password: { type: string }
+        new_password: { type: string, minLength: 8 }
+    UpdateRoleRequest:
+      type: object
+      required: [role]
+      properties:
+        role: { $ref: "#/components/schemas/Role" }
+    CategoryRequest:
+      type: object
+      required: [name]
+      properties:
+        name: { type: string, minLength: 3, maxLength: 100 }
+        description: { type: string, maxLength: 255 }
+    TagRequest:
+      type: object
+      required: [name]
+      properties:
+        name: { type: string, minLength: 2, maxLength: 50 }
+    ArticleRequest:
+      type: object
+      required: [title, content, category_id, status]
+      properties:
+        title: { type: string, minLength: 20, maxLength: 200 }
+        content: { type: string, minLength: 200, maxLength: 100000 }
+        category_id: { type: integer, format: int64 }
+        tags:
+          type: array
+          maxItems: 10
+          items: { type: string, minLength: 2, maxLength: 50 }
+        status: { $ref: "#/components/schemas/ArticleStatus" }
+      example:
+        title: Panduan Membangun REST API dengan Golang
+        content: >-
+          Artikel ini membahas cara menyusun REST API dengan Go dari nol: menata
+          struktur folder, memisahkan handler, service, dan repository, menulis
+          migrasi database, sampai menguji endpoint secara end-to-end dengan MySQL.
+        category_id: 1
+        tags: [golang, backend]
+        status: draft
+    ArticlePatch:
+      type: object
+      description: Semua field opsional; aturannya sama dengan ArticleRequest.
+      properties:
+        title: { type: string }
+        content: { type: string }
+        category_id: { type: integer, format: int64 }
+        tags:
+          type: array
+          items: { type: string }
+        status: { $ref: "#/components/schemas/ArticleStatus" }
+    CommentRequest:
+      type: object
+      required: [body]
+      properties:
+        body: { type: string, minLength: 1, maxLength: 2000 }
+
+    TokenEnvelope:
+      type: object
+      properties:
+        data: { $ref: "#/components/schemas/TokenPair" }
+    UserEnvelope:
+      type: object
+      properties:
+        data: { $ref: "#/components/schemas/User" }
+    CategoryEnvelope:
+      type: object
+      properties:
+        data: { $ref: "#/components/schemas/Category" }
+    TagEnvelope:
+      type: object
+      properties:
+        data: { $ref: "#/components/schemas/Tag" }
+    ArticleEnvelope:
+      type: object
+      properties:
+        data: { $ref: "#/components/schemas/Article" }
+    ArticleListEnvelope:
+      type: object
+      properties:
+        data:
+          type: array
+          items: { $ref: "#/components/schemas/ArticleSummary" }
+        meta: { $ref: "#/components/schemas/PaginationMeta" }
+    CommentEnvelope:
+      type: object
+      properties:
+        data: { $ref: "#/components/schemas/Comment" }

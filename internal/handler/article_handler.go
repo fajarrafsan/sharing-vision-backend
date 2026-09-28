@@ -1,126 +1,138 @@
 package handler
 
 import (
-	"encoding/json"
+	"context"
 	"net/http"
 	"strconv"
 
-	"sharing-vision-backend/internal/apperr"
-	"sharing-vision-backend/internal/dto"
-	"sharing-vision-backend/internal/response"
-	"sharing-vision-backend/internal/service"
+	"warta/internal/auth"
+	"warta/internal/dto"
+	"warta/internal/pagination"
+	"warta/internal/response"
+	"warta/internal/service"
 )
 
 type ArticleHandler struct {
 	service service.ArticleService
+	pages   pagination.Parser
 }
 
-func NewArticleHandler(s service.ArticleService) *ArticleHandler {
-	return &ArticleHandler{service: s}
+func NewArticleHandler(s service.ArticleService, pages pagination.Parser) *ArticleHandler {
+	return &ArticleHandler{service: s, pages: pages}
+}
+
+type articleLister func(ctx context.Context, actor auth.Actor, q dto.ArticleQuery, p pagination.Params) ([]dto.ArticleSummary, pagination.Meta, error)
+
+func (h *ArticleHandler) List(w http.ResponseWriter, r *http.Request) {
+	h.list(w, r, h.service.List)
+}
+
+func (h *ArticleHandler) ListMine(w http.ResponseWriter, r *http.Request) {
+	h.list(w, r, h.service.ListMine)
+}
+
+func (h *ArticleHandler) list(w http.ResponseWriter, r *http.Request, fetch articleLister) {
+	page, err := h.pages.Parse(r.URL.Query())
+	if err != nil {
+		response.Error(w, r, err)
+		return
+	}
+
+	authorID, err := queryID(r, "author")
+	if err != nil {
+		response.Error(w, r, err)
+		return
+	}
+
+	query := dto.ArticleQuery{
+		Query:    queryString(r, "q"),
+		Category: queryString(r, "category"),
+		Tag:      queryString(r, "tag"),
+		AuthorID: authorID,
+		Status:   queryString(r, "status"),
+		Sort:     queryString(r, "sort"),
+	}
+
+	articles, meta, err := fetch(r.Context(), auth.ActorFrom(r.Context()), query, page)
+	if err != nil {
+		response.Error(w, r, err)
+		return
+	}
+
+	response.List(w, articles, meta)
+}
+
+func (h *ArticleHandler) Get(w http.ResponseWriter, r *http.Request) {
+	article, err := h.service.Get(r.Context(), auth.ActorFrom(r.Context()), r.PathValue("ref"))
+	if err != nil {
+		response.Error(w, r, err)
+		return
+	}
+
+	response.Data(w, http.StatusOK, article)
 }
 
 func (h *ArticleHandler) Create(w http.ResponseWriter, r *http.Request) {
-	req, ok := readRequest(w, r)
-	if !ok {
+	var req dto.ArticleRequest
+	if err := decodeJSON(r, &req); err != nil {
+		response.Error(w, r, err)
 		return
 	}
 
-	article, err := h.service.Create(req)
+	article, err := h.service.Create(r.Context(), auth.ActorFrom(r.Context()), req)
 	if err != nil {
-		response.Error(w, err)
+		response.Error(w, r, err)
 		return
 	}
 
-	response.JSON(w, http.StatusCreated, article)
+	w.Header().Set("Location", "/api/v1/articles/"+strconv.FormatInt(article.ID, 10))
+	response.Data(w, http.StatusCreated, article)
 }
 
-func (h *ArticleHandler) List(w http.ResponseWriter, r *http.Request) {
-	limit, err := strconv.Atoi(r.PathValue("limit"))
-	if err != nil {
-		response.Error(w, apperr.BadRequest("limit harus berupa angka"))
-		return
-	}
-
-	offset, err := strconv.Atoi(r.PathValue("offset"))
-	if err != nil {
-		response.Error(w, apperr.BadRequest("offset harus berupa angka"))
-		return
-	}
-
-	articles, err := h.service.List(limit, offset)
-	if err != nil {
-		response.Error(w, err)
-		return
-	}
-
-	response.JSON(w, http.StatusOK, articles)
+// Replace menangani PUT: semua field wajib dikirim.
+func (h *ArticleHandler) Replace(w http.ResponseWriter, r *http.Request) {
+	var req dto.ArticleRequest
+	h.update(w, r, &req, func() dto.ArticlePatch { return req.AsPatch() })
 }
 
-func (h *ArticleHandler) GetByID(w http.ResponseWriter, r *http.Request) {
-	id, ok := readID(w, r)
-	if !ok {
-		return
-	}
-
-	article, err := h.service.GetByID(id)
-	if err != nil {
-		response.Error(w, err)
-		return
-	}
-
-	response.JSON(w, http.StatusOK, article)
+// Patch menangani PATCH: hanya field yang dikirim yang diubah.
+func (h *ArticleHandler) Patch(w http.ResponseWriter, r *http.Request) {
+	var patch dto.ArticlePatch
+	h.update(w, r, &patch, func() dto.ArticlePatch { return patch })
 }
 
-func (h *ArticleHandler) Update(w http.ResponseWriter, r *http.Request) {
-	id, ok := readID(w, r)
-	if !ok {
-		return
-	}
-
-	req, ok := readRequest(w, r)
-	if !ok {
-		return
-	}
-
-	article, err := h.service.Update(id, req)
+func (h *ArticleHandler) update(w http.ResponseWriter, r *http.Request, body any, toPatch func() dto.ArticlePatch) {
+	id, err := pathID(r, "id")
 	if err != nil {
-		response.Error(w, err)
+		response.Error(w, r, err)
 		return
 	}
 
-	response.JSON(w, http.StatusOK, article)
+	if err := decodeJSON(r, body); err != nil {
+		response.Error(w, r, err)
+		return
+	}
+
+	article, err := h.service.Update(r.Context(), auth.ActorFrom(r.Context()), id, toPatch())
+	if err != nil {
+		response.Error(w, r, err)
+		return
+	}
+
+	response.Data(w, http.StatusOK, article)
 }
 
 func (h *ArticleHandler) Delete(w http.ResponseWriter, r *http.Request) {
-	id, ok := readID(w, r)
-	if !ok {
+	id, err := pathID(r, "id")
+	if err != nil {
+		response.Error(w, r, err)
 		return
 	}
 
-	if err := h.service.Delete(id); err != nil {
-		response.Error(w, err)
+	if err := h.service.Delete(r.Context(), auth.ActorFrom(r.Context()), id); err != nil {
+		response.Error(w, r, err)
 		return
 	}
 
-	response.Empty(w, http.StatusOK)
-}
-
-func readID(w http.ResponseWriter, r *http.Request) (int64, bool) {
-	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
-	if err != nil || id <= 0 {
-		response.Error(w, apperr.BadRequest("id harus berupa angka bulat positif"))
-		return 0, false
-	}
-	return id, true
-}
-
-func readRequest(w http.ResponseWriter, r *http.Request) (dto.ArticleRequest, bool) {
-	var req dto.ArticleRequest
-
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		response.Error(w, apperr.BadRequest("body JSON tidak bisa dibaca"))
-		return req, false
-	}
-
-	return req, true
+	response.NoContent(w)
 }

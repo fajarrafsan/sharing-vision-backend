@@ -4,58 +4,142 @@ import (
 	"strings"
 	"time"
 
-	"sharing-vision-backend/internal/model"
+	"warta/internal/model"
 )
 
+// ArticleRequest dipakai POST dan PUT, semua field wajib dikirim.
 type ArticleRequest struct {
-	Title    string `json:"title"`
-	Content  string `json:"content"`
-	Category string `json:"category"`
-	Status   string `json:"status"`
+	Title      string   `json:"title"`
+	Content    string   `json:"content"`
+	CategoryID int64    `json:"category_id"`
+	Tags       []string `json:"tags"`
+	Status     string   `json:"status"`
 }
 
 func (r *ArticleRequest) Normalize() {
-	r.Title = strings.TrimSpace(r.Title)
+	r.Title = collapseSpaces(r.Title)
 	r.Content = strings.TrimSpace(r.Content)
-	r.Category = strings.TrimSpace(r.Category)
 	r.Status = strings.ToLower(strings.TrimSpace(r.Status))
+
+	seen := make(map[string]bool, len(r.Tags))
+	tags := make([]string, 0, len(r.Tags))
+	for _, t := range r.Tags {
+		t = NormalizeTag(t)
+		if t != "" && !seen[t] {
+			seen[t] = true
+			tags = append(tags, t)
+		}
+	}
+	r.Tags = tags
 }
 
-func (r ArticleRequest) ToModel() model.Article {
-	return model.Article{
-		Title:    r.Title,
-		Content:  r.Content,
-		Category: r.Category,
-		Status:   r.Status,
+// AsPatch mengubah request lengkap menjadi patch yang mengisi semua field,
+// sehingga PUT dan PATCH berbagi satu jalur di service. Tags yang tidak
+// dikirim pada PUT berarti article tidak punya tag.
+func (r ArticleRequest) AsPatch() ArticlePatch {
+	tags := r.Tags
+	if tags == nil {
+		tags = []string{}
 	}
+	return ArticlePatch{
+		Title:      &r.Title,
+		Content:    &r.Content,
+		CategoryID: &r.CategoryID,
+		Tags:       &tags,
+		Status:     &r.Status,
+	}
+}
+
+// ArticlePatch dipakai PATCH. Field yang tidak dikirim (nil) tidak diubah.
+type ArticlePatch struct {
+	Title      *string   `json:"title"`
+	Content    *string   `json:"content"`
+	CategoryID *int64    `json:"category_id"`
+	Tags       *[]string `json:"tags"`
+	Status     *string   `json:"status"`
+}
+
+// Apply menimpa base dengan field yang dikirim. Hasilnya request lengkap yang
+// divalidasi dengan aturan yang sama seperti saat membuat article.
+func (p ArticlePatch) Apply(base ArticleRequest) ArticleRequest {
+	if p.Title != nil {
+		base.Title = *p.Title
+	}
+	if p.Content != nil {
+		base.Content = *p.Content
+	}
+	if p.CategoryID != nil {
+		base.CategoryID = *p.CategoryID
+	}
+	if p.Tags != nil {
+		base.Tags = *p.Tags
+	}
+	if p.Status != nil {
+		base.Status = *p.Status
+	}
+	return base
+}
+
+type ArticleQuery struct {
+	Query    string
+	Category string
+	Tag      string
+	AuthorID int64
+	Status   string
+	Sort     string
+}
+
+// ArticleSummary dipakai di daftar article: isi lengkap diganti cuplikan.
+type ArticleSummary struct {
+	ID           int64          `json:"id"`
+	Title        string         `json:"title"`
+	Slug         string         `json:"slug"`
+	Excerpt      string         `json:"excerpt"`
+	Status       string         `json:"status"`
+	Author       AuthorResponse `json:"author"`
+	Category     CategoryRef    `json:"category"`
+	Tags         []TagRef       `json:"tags"`
+	CommentCount int            `json:"comment_count"`
+	PublishedAt  *time.Time     `json:"published_at"`
+	CreatedAt    time.Time      `json:"created_at"`
+	UpdatedAt    time.Time      `json:"updated_at"`
 }
 
 type ArticleResponse struct {
-	ID          int64     `json:"id"`
-	Title       string    `json:"title"`
-	Content     string    `json:"content"`
-	Category    string    `json:"category"`
-	Status      string    `json:"status"`
-	CreatedDate time.Time `json:"created_date"`
-	UpdatedDate time.Time `json:"updated_date"`
+	ArticleSummary
+	Content string `json:"content"`
+}
+
+func NewArticleSummary(a model.Article) ArticleSummary {
+	tags := make([]TagRef, 0, len(a.Tags))
+	for _, t := range a.Tags {
+		tags = append(tags, TagRef{ID: t.ID, Name: t.Name, Slug: t.Slug})
+	}
+
+	return ArticleSummary{
+		ID:           a.ID,
+		Title:        a.Title,
+		Slug:         a.Slug,
+		Excerpt:      a.Excerpt,
+		Status:       string(a.Status),
+		Author:       AuthorResponse{ID: a.AuthorID, Name: a.AuthorName},
+		Category:     CategoryRef{ID: a.CategoryID, Name: a.CategoryName, Slug: a.CategorySlug},
+		Tags:         tags,
+		CommentCount: a.CommentCount,
+		PublishedAt:  a.PublishedAt,
+		CreatedAt:    a.CreatedAt,
+		UpdatedAt:    a.UpdatedAt,
+	}
+}
+
+func NewArticleSummaries(articles []model.Article) []ArticleSummary {
+	summaries := make([]ArticleSummary, 0, len(articles))
+	for _, a := range articles {
+		summaries = append(summaries, NewArticleSummary(a))
+	}
+	return summaries
 }
 
 func NewArticleResponse(a model.Article) ArticleResponse {
-	return ArticleResponse{
-		ID:          a.ID,
-		Title:       a.Title,
-		Content:     a.Content,
-		Category:    a.Category,
-		Status:      a.Status,
-		CreatedDate: a.CreatedDate,
-		UpdatedDate: a.UpdatedDate,
-	}
-}
-
-func NewArticleResponses(articles []model.Article) []ArticleResponse {
-	responses := []ArticleResponse{}
-	for _, a := range articles {
-		responses = append(responses, NewArticleResponse(a))
-	}
-	return responses
+	return ArticleResponse{ArticleSummary: NewArticleSummary(a), Content: a.Content}
 }

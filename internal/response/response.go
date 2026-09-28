@@ -3,38 +3,50 @@ package response
 import (
 	"encoding/json"
 	"errors"
-	"log"
+	"log/slog"
 	"net/http"
 
-	"sharing-vision-backend/internal/apperr"
+	"warta/internal/apperr"
 )
 
-func JSON(w http.ResponseWriter, status int, data any) {
-	w.Header().Set("Content-Type", "application/json")
+type envelope struct {
+	Data any `json:"data"`
+	Meta any `json:"meta,omitempty"`
+}
+
+// JSON menulis body apa adanya. Endpoint API memakai Data atau List supaya
+// bentuk response-nya seragam.
+func JSON(w http.ResponseWriter, status int, body any) {
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.WriteHeader(status)
 
-	if err := json.NewEncoder(w).Encode(data); err != nil {
-		log.Println("gagal menulis response:", err)
+	if err := json.NewEncoder(w).Encode(body); err != nil {
+		slog.Error("gagal menulis response", "error", err)
 	}
 }
 
-func Empty(w http.ResponseWriter, status int) {
-	JSON(w, status, map[string]string{})
+func Data(w http.ResponseWriter, status int, data any) {
+	JSON(w, status, envelope{Data: data})
 }
 
-func Error(w http.ResponseWriter, err error) {
+func List(w http.ResponseWriter, data any, meta any) {
+	JSON(w, http.StatusOK, envelope{Data: data, Meta: meta})
+}
+
+func NoContent(w http.ResponseWriter) {
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func Error(w http.ResponseWriter, r *http.Request, err error) {
 	var appErr *apperr.Error
 	if !errors.As(err, &appErr) {
-		log.Println("error tidak terduga:", err)
-		JSON(w, http.StatusInternalServerError, map[string]string{
-			"message": "terjadi kesalahan pada server",
-		})
-		return
+		appErr = apperr.Internal(err)
 	}
 
-	if appErr.Cause != nil {
-		log.Println("error:", appErr.Cause)
+	if appErr.Status >= http.StatusInternalServerError {
+		slog.ErrorContext(r.Context(), "permintaan gagal",
+			"method", r.Method, "path", r.URL.Path, "error", appErr.Cause)
 	}
 
-	JSON(w, appErr.Status, appErr)
+	JSON(w, appErr.Status, map[string]any{"error": appErr})
 }

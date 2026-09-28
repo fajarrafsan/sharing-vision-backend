@@ -1,24 +1,108 @@
--- Pembuatan database dan tabel posts secara manual, sebagai alternatif migrate.
+-- Skema lengkap Warta, hasil akhir semua migrasi di folder migrations.
+-- Alternatif untuk membuat database manual tanpa migrate:
 --   mysql -u root -p < docs/schema.sql
+-- Database yang dibuat dengan cara ini tidak punya tabel schema_migrations,
+-- jadi jalankan service dengan AUTO_MIGRATE=false.
 
-CREATE DATABASE IF NOT EXISTS article
+SET NAMES utf8mb4;
+
+CREATE DATABASE IF NOT EXISTS warta
     CHARACTER SET utf8mb4
     COLLATE utf8mb4_unicode_ci;
 
-USE article;
+USE warta;
 
-CREATE TABLE IF NOT EXISTS posts (
-    id           INT          NOT NULL AUTO_INCREMENT,
-    title        VARCHAR(200) NOT NULL,
-    content      TEXT         NOT NULL,
-    category     VARCHAR(100) NOT NULL,
-    created_date TIMESTAMP    NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    updated_date TIMESTAMP    NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-    status       VARCHAR(100) NOT NULL COMMENT 'publish | draft | thrash',
+CREATE TABLE IF NOT EXISTS users (
+    id            BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+    name          VARCHAR(100)    NOT NULL,
+    email         VARCHAR(191)    NOT NULL,
+    password_hash VARCHAR(255)    NOT NULL,
+    role          VARCHAR(20)     NOT NULL DEFAULT 'reader',
+    created_at    TIMESTAMP       NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at    TIMESTAMP       NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
     PRIMARY KEY (id),
-    KEY idx_posts_status (status),
-    KEY idx_posts_category (category),
-    KEY idx_posts_created_date (created_date)
-) ENGINE = InnoDB
-  DEFAULT CHARSET = utf8mb4
-  COLLATE = utf8mb4_unicode_ci;
+    UNIQUE KEY uq_users_email (email),
+    KEY idx_users_role (role),
+    CONSTRAINT chk_users_role CHECK (role IN ('admin', 'author', 'reader'))
+) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4 COLLATE = utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS refresh_tokens (
+    id         BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+    user_id    BIGINT UNSIGNED NOT NULL,
+    token_hash CHAR(64) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+    expires_at TIMESTAMP       NOT NULL,
+    revoked_at TIMESTAMP       NULL DEFAULT NULL,
+    created_at TIMESTAMP       NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (id),
+    UNIQUE KEY uq_refresh_tokens_hash (token_hash),
+    KEY idx_refresh_tokens_user (user_id),
+    KEY idx_refresh_tokens_expires (expires_at),
+    CONSTRAINT fk_refresh_tokens_user FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE CASCADE
+) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4 COLLATE = utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS categories (
+    id          BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+    name        VARCHAR(100)    NOT NULL,
+    slug        VARCHAR(130)    NOT NULL,
+    description VARCHAR(255)    NOT NULL DEFAULT '',
+    created_at  TIMESTAMP       NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at  TIMESTAMP       NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    PRIMARY KEY (id),
+    UNIQUE KEY uq_categories_name (name),
+    UNIQUE KEY uq_categories_slug (slug)
+) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4 COLLATE = utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS tags (
+    id         BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+    name       VARCHAR(50)     NOT NULL,
+    slug       VARCHAR(70)     NOT NULL,
+    created_at TIMESTAMP       NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (id),
+    UNIQUE KEY uq_tags_name (name),
+    UNIQUE KEY uq_tags_slug (slug)
+) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4 COLLATE = utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS articles (
+    id           BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+    author_id    BIGINT UNSIGNED NOT NULL,
+    category_id  BIGINT UNSIGNED NOT NULL,
+    title        VARCHAR(200)    NOT NULL,
+    slug         VARCHAR(220)    NOT NULL,
+    content      MEDIUMTEXT      NOT NULL,
+    created_at   TIMESTAMP       NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at   TIMESTAMP       NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    status       VARCHAR(20)     NOT NULL DEFAULT 'draft',
+    published_at TIMESTAMP       NULL DEFAULT NULL,
+    PRIMARY KEY (id),
+    UNIQUE KEY uq_articles_slug (slug),
+    KEY idx_articles_author (author_id),
+    KEY idx_articles_category (category_id),
+    KEY idx_articles_status_published (status, published_at),
+    KEY idx_articles_created (created_at),
+    CONSTRAINT fk_articles_author FOREIGN KEY (author_id) REFERENCES users (id),
+    CONSTRAINT fk_articles_category FOREIGN KEY (category_id) REFERENCES categories (id),
+    CONSTRAINT chk_articles_status CHECK (status IN ('draft', 'published', 'archived'))
+) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4 COLLATE = utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS article_tags (
+    article_id BIGINT UNSIGNED NOT NULL,
+    tag_id     BIGINT UNSIGNED NOT NULL,
+    PRIMARY KEY (article_id, tag_id),
+    KEY idx_article_tags_tag (tag_id),
+    CONSTRAINT fk_article_tags_article FOREIGN KEY (article_id) REFERENCES articles (id) ON DELETE CASCADE,
+    CONSTRAINT fk_article_tags_tag FOREIGN KEY (tag_id) REFERENCES tags (id) ON DELETE CASCADE
+) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4 COLLATE = utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS comments (
+    id         BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+    article_id BIGINT UNSIGNED NOT NULL,
+    user_id    BIGINT UNSIGNED NOT NULL,
+    body       TEXT            NOT NULL,
+    created_at TIMESTAMP       NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP       NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    PRIMARY KEY (id),
+    KEY idx_comments_article_created (article_id, created_at),
+    KEY idx_comments_user (user_id),
+    CONSTRAINT fk_comments_article FOREIGN KEY (article_id) REFERENCES articles (id) ON DELETE CASCADE,
+    CONSTRAINT fk_comments_user FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE CASCADE
+) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4 COLLATE = utf8mb4_unicode_ci;

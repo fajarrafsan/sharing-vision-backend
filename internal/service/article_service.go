@@ -1,118 +1,286 @@
 package service
 
 import (
+	"context"
 	"errors"
+	"time"
 
-	"sharing-vision-backend/internal/apperr"
-	"sharing-vision-backend/internal/dto"
-	"sharing-vision-backend/internal/repository"
-	"sharing-vision-backend/internal/validation"
+	"warta/internal/apperr"
+	"warta/internal/auth"
+	"warta/internal/dto"
+	"warta/internal/model"
+	"warta/internal/pagination"
+	"warta/internal/repository"
+	"warta/internal/slug"
+	"warta/internal/validation"
 )
 
+// statusAll dipakai admin untuk melihat article semua status sekaligus.
+const statusAll = "all"
+
 type ArticleService interface {
-	Create(req dto.ArticleRequest) (dto.ArticleResponse, error)
-	List(limit, offset int) ([]dto.ArticleResponse, error)
-	GetByID(id int64) (dto.ArticleResponse, error)
-	Update(id int64, req dto.ArticleRequest) (dto.ArticleResponse, error)
-	Delete(id int64) error
+	// List menampilkan article yang sudah terbit. Admin bisa memilih status lain.
+	List(ctx context.Context, actor auth.Actor, q dto.ArticleQuery, p pagination.Params) ([]dto.ArticleSummary, pagination.Meta, error)
+	// ListMine menampilkan article milik actor dengan status apa pun.
+	ListMine(ctx context.Context, actor auth.Actor, q dto.ArticleQuery, p pagination.Params) ([]dto.ArticleSummary, pagination.Meta, error)
+	// Get menerima id maupun slug.
+	Get(ctx context.Context, actor auth.Actor, ref string) (dto.ArticleResponse, error)
+	Create(ctx context.Context, actor auth.Actor, req dto.ArticleRequest) (dto.ArticleResponse, error)
+	Update(ctx context.Context, actor auth.Actor, id int64, patch dto.ArticlePatch) (dto.ArticleResponse, error)
+	Delete(ctx context.Context, actor auth.Actor, id int64) error
 }
 
 type articleService struct {
-	repo         repository.ArticleRepository
-	defaultLimit int
-	maxLimit     int
+	articles   repository.ArticleRepository
+	categories repository.CategoryRepository
+	now        func() time.Time
 }
 
-func NewArticleService(repo repository.ArticleRepository, defaultLimit, maxLimit int) ArticleService {
-	return &articleService{
-		repo:         repo,
-		defaultLimit: defaultLimit,
-		maxLimit:     maxLimit,
-	}
+func NewArticleService(articles repository.ArticleRepository, categories repository.CategoryRepository) ArticleService {
+	return &articleService{articles: articles, categories: categories, now: time.Now}
 }
 
-func (s *articleService) Create(req dto.ArticleRequest) (dto.ArticleResponse, error) {
-	req.Normalize()
+var errArticleNotFound = apperr.NotFound("article tidak ditemukan")
 
-	if problems := validation.ValidateArticle(req); len(problems) > 0 {
-		return dto.ArticleResponse{}, apperr.Validation(problems)
+// canView: article yang belum terbit hanya terlihat oleh penulisnya dan admin.
+// Bagi orang lain article itu dianggap tidak ada (404), bukan 403, supaya
+// keberadaan draft tidak bocor.
+func canView(actor auth.Actor, a model.Article) bool {
+	return a.IsPublished() || actor.IsAdmin() || (actor.Authenticated() && actor.ID == a.AuthorID)
+}
+
+func canModify(actor auth.Actor, a model.Article) bool {
+	return actor.IsAdmin() || (actor.CanWrite() && actor.ID == a.AuthorID)
+}
+
+func (s *articleService) List(ctx context.Context, actor auth.Actor, q dto.ArticleQuery, p pagination.Params) ([]dto.ArticleSummary, pagination.Meta, error) {
+	filter, err := articleFilter(q)
+	if err != nil {
+		return nil, pagination.Meta{}, err
 	}
 
-	article := req.ToModel()
-	if err := s.repo.Create(&article); err != nil {
+	switch {
+	case q.Status == "":
+		filter.Status = model.StatusPublished
+	case filter.Status != model.StatusPublished && !actor.IsAdmin():
+		return nil, pagination.Meta{}, apperr.Forbidden("hanya admin yang bisa melihat article yang belum terbit")
+	}
+
+	return s.list(ctx, filter, p)
+}
+
+func (s *articleService) ListMine(ctx context.Context, actor auth.Actor, q dto.ArticleQuery, p pagination.Params) ([]dto.ArticleSummary, pagination.Meta, error) {
+	filter, err := articleFilter(q)
+	if err != nil {
+		return nil, pagination.Meta{}, err
+	}
+	filter.AuthorID = actor.ID
+
+	return s.list(ctx, filter, p)
+}
+
+func (s *articleService) list(ctx context.Context, f repository.ArticleFilter, p pagination.Params) ([]dto.ArticleSummary, pagination.Meta, error) {
+	articles, total, err := s.articles.List(ctx, f, p)
+	if err != nil {
+		return nil, pagination.Meta{}, apperr.Internal(err)
+	}
+	return dto.NewArticleSummaries(articles), pagination.NewMeta(p, total), nil
+}
+
+func articleFilter(q dto.ArticleQuery) (repository.ArticleFilter, error) {
+	f := repository.ArticleFilter{
+		Query:        q.Query,
+		CategorySlug: q.Category,
+		TagSlug:      q.Tag,
+		AuthorID:     q.AuthorID,
+		Sort:         q.Sort,
+	}
+
+	if f.Sort == "" {
+		f.Sort = repository.SortNewest
+	}
+	if !repository.ValidSort(f.Sort) {
+		return f, apperr.BadRequest("sort harus newest, oldest, title, atau updated")
+	}
+
+	switch status := model.ArticleStatus(q.Status); {
+	case q.Status == "" || q.Status == statusAll:
+	case status.Valid():
+		f.Status = status
+	default:
+		return f, apperr.BadRequest("status harus draft, published, archived, atau all")
+	}
+
+	return f, nil
+}
+
+func (s *articleService) Get(ctx context.Context, actor auth.Actor, ref string) (dto.ArticleResponse, error) {
+	var article model.Article
+	var err error
+
+	if id, ok := parseID(ref); ok {
+		article, err = s.articles.FindByID(ctx, id)
+	} else {
+		article, err = s.articles.FindBySlug(ctx, ref)
+	}
+	if errors.Is(err, repository.ErrNotFound) || err == nil && !canView(actor, article) {
+		return dto.ArticleResponse{}, errArticleNotFound
+	}
+	if err != nil {
 		return dto.ArticleResponse{}, apperr.Internal(err)
 	}
 
 	return dto.NewArticleResponse(article), nil
 }
 
-func (s *articleService) List(limit, offset int) ([]dto.ArticleResponse, error) {
-	limit, offset = s.clampPaging(limit, offset)
-
-	articles, err := s.repo.FindAll(limit, offset)
-	if err != nil {
-		return nil, apperr.Internal(err)
+func (s *articleService) Create(ctx context.Context, actor auth.Actor, req dto.ArticleRequest) (dto.ArticleResponse, error) {
+	if !actor.CanWrite() {
+		return dto.ArticleResponse{}, apperr.Forbidden("hanya author dan admin yang bisa menulis article")
 	}
 
-	return dto.NewArticleResponses(articles), nil
-}
-
-func (s *articleService) GetByID(id int64) (dto.ArticleResponse, error) {
-	article, err := s.repo.FindByID(id)
-	if err != nil {
-		return dto.ArticleResponse{}, translate(err)
+	req.Normalize()
+	if err := s.validate(ctx, req, 0); err != nil {
+		return dto.ArticleResponse{}, err
 	}
 
-	return dto.NewArticleResponse(article), nil
+	article := model.Article{
+		AuthorID:   actor.ID,
+		CategoryID: req.CategoryID,
+		Title:      req.Title,
+		Content:    req.Content,
+		Status:     model.ArticleStatus(req.Status),
+	}
+
+	var err error
+	if article.Slug, err = s.uniqueSlug(ctx, article.Title, 0); err != nil {
+		return dto.ArticleResponse{}, apperr.Internal(err)
+	}
+	if article.IsPublished() {
+		now := s.now()
+		article.PublishedAt = &now
+	}
+
+	if err := s.articles.Create(ctx, &article, req.Tags); err != nil {
+		return dto.ArticleResponse{}, writeError(err)
+	}
+
+	return s.Get(ctx, actor, idRef(article.ID))
 }
 
-func (s *articleService) Update(id int64, req dto.ArticleRequest) (dto.ArticleResponse, error) {
+func (s *articleService) Update(ctx context.Context, actor auth.Actor, id int64, patch dto.ArticlePatch) (dto.ArticleResponse, error) {
+	article, err := s.editable(ctx, actor, id)
+	if err != nil {
+		return dto.ArticleResponse{}, err
+	}
+
+	req := patch.Apply(dto.ArticleRequest{
+		Title:      article.Title,
+		Content:    article.Content,
+		CategoryID: article.CategoryID,
+		Tags:       article.TagNames(),
+		Status:     string(article.Status),
+	})
 	req.Normalize()
 
-	if problems := validation.ValidateArticle(req); len(problems) > 0 {
-		return dto.ArticleResponse{}, apperr.Validation(problems)
+	if err := s.validate(ctx, req, article.CategoryID); err != nil {
+		return dto.ArticleResponse{}, err
 	}
 
-	article, err := s.repo.FindByID(id)
-	if err != nil {
-		return dto.ArticleResponse{}, translate(err)
+	// Slug ikut berubah bersama judul hanya selama article belum pernah
+	// terbit. Setelah terbit, tautannya mungkin sudah tersebar.
+	if req.Title != article.Title && article.PublishedAt == nil {
+		if article.Slug, err = s.uniqueSlug(ctx, req.Title, article.ID); err != nil {
+			return dto.ArticleResponse{}, apperr.Internal(err)
+		}
 	}
 
 	article.Title = req.Title
 	article.Content = req.Content
-	article.Category = req.Category
-	article.Status = req.Status
-
-	if err := s.repo.Update(&article); err != nil {
-		return dto.ArticleResponse{}, apperr.Internal(err)
+	article.CategoryID = req.CategoryID
+	article.Status = model.ArticleStatus(req.Status)
+	if article.IsPublished() && article.PublishedAt == nil {
+		now := s.now()
+		article.PublishedAt = &now
 	}
 
-	return dto.NewArticleResponse(article), nil
+	var tags *[]string
+	if patch.Tags != nil {
+		tags = &req.Tags
+	}
+
+	if err := s.articles.Update(ctx, &article, tags); err != nil {
+		return dto.ArticleResponse{}, writeError(err)
+	}
+
+	return s.Get(ctx, actor, idRef(article.ID))
 }
 
-func (s *articleService) Delete(id int64) error {
-	if err := s.repo.Delete(id); err != nil {
-		return translate(err)
+func (s *articleService) Delete(ctx context.Context, actor auth.Actor, id int64) error {
+	if _, err := s.editable(ctx, actor, id); err != nil {
+		return err
+	}
+
+	err := s.articles.Delete(ctx, id)
+	if errors.Is(err, repository.ErrNotFound) {
+		return errArticleNotFound
+	}
+	if err != nil {
+		return apperr.Internal(err)
 	}
 	return nil
 }
 
-func (s *articleService) clampPaging(limit, offset int) (int, int) {
-	if limit <= 0 {
-		limit = s.defaultLimit
+// editable memuat article yang akan diubah atau dihapus oleh actor.
+func (s *articleService) editable(ctx context.Context, actor auth.Actor, id int64) (model.Article, error) {
+	article, err := s.articles.FindByID(ctx, id)
+	if errors.Is(err, repository.ErrNotFound) || err == nil && !canView(actor, article) {
+		return model.Article{}, errArticleNotFound
 	}
-	if limit > s.maxLimit {
-		limit = s.maxLimit
+	if err != nil {
+		return model.Article{}, apperr.Internal(err)
 	}
-	if offset < 0 {
-		offset = 0
+
+	if !canModify(actor, article) {
+		return model.Article{}, apperr.Forbidden("hanya penulis article dan admin yang bisa mengubahnya")
 	}
-	return limit, offset
+	return article, nil
 }
 
-func translate(err error) error {
+// validate memeriksa aturan field lalu keberadaan kategori. knownCategory
+// adalah id kategori yang sudah pasti ada sehingga tidak perlu dicek ulang.
+func (s *articleService) validate(ctx context.Context, req dto.ArticleRequest, knownCategory int64) error {
+	if problems := validation.ValidateArticle(req); len(problems) > 0 {
+		return apperr.Validation(problems)
+	}
+	if req.CategoryID == knownCategory {
+		return nil
+	}
+
+	_, err := s.categories.FindByID(ctx, req.CategoryID)
 	if errors.Is(err, repository.ErrNotFound) {
-		return apperr.NotFound("article tidak ditemukan")
+		return apperr.Validation(map[string]string{"category_id": "kategori tidak ditemukan"})
+	}
+	if err != nil {
+		return apperr.Internal(err)
+	}
+	return nil
+}
+
+func (s *articleService) uniqueSlug(ctx context.Context, title string, excludeID int64) (string, error) {
+	base := slug.Make(title, "artikel", 200)
+	taken, err := s.articles.SlugsWithPrefix(ctx, base, excludeID)
+	if err != nil {
+		return "", err
+	}
+	return slug.Unique(base, taken), nil
+}
+
+func writeError(err error) error {
+	switch {
+	case errors.Is(err, repository.ErrMissingReference):
+		return apperr.Validation(map[string]string{"category_id": "kategori tidak ditemukan"})
+	case errors.Is(err, repository.ErrDuplicate):
+		return apperr.Conflict("article atau tag yang sama sedang disimpan bersamaan, coba lagi")
 	}
 	return apperr.Internal(err)
 }
