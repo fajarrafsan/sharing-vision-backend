@@ -1,0 +1,32 @@
+# Override untuk production. Dipakai bersama docker-compose.yml:
+#
+#   docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build
+#
+# Semua rahasia wajib diisi lewat .env (lihat .env.example); compose menolak
+# jalan bila ada yang kosong, dan service menolak nilai contoh karena
+# APP_ENV=production.
+services:
+  mysql:
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?isi MYSQL_ROOT_PASSWORD di .env}
+      # Service memakai user sendiri, bukan root. User ini hanya punya akses
+      # ke database warta. Catatan: image MySQL hanya membuat user dan password
+      # saat volume masih kosong.
+      MYSQL_USER: warta
+      MYSQL_PASSWORD: ${DB_PASSWORD:?isi DB_PASSWORD di .env}
+    # Database tidak dibuka ke luar server.
+    ports: !reset []
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
+
+  api:
+    environment:
+      APP_ENV: production
+      DB_USER: warta
+      DB_PASSWORD: ${DB_PASSWORD:?isi DB_PASSWORD di .env}
+      JWT_SECRET: ${JWT_SECRET:?isi JWT_SECRET di .env}
+      ADMIN_EMAIL: ${ADMIN_EMAIL:?isi ADMIN_EMAIL di .env}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:?isi ADMIN_PASSWORD di .env}
+      CORS_ORIGINS: ${CORS_ORIGINS:?isi CORS_ORIGINS dengan origin frontend}
+      # IP reverse proxy di depan service, misalnya Nginx atau load balancer.
+      TRUSTED_PROXIES: ${TRUSTED_PROXIES:-}

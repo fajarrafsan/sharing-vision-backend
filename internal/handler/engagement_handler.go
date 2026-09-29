@@ -3,12 +3,12 @@ package handler
 import (
 	"context"
 	"errors"
-	"net"
 	"net/http"
 	"strconv"
 
 	"warta/internal/apperr"
 	"warta/internal/auth"
+	"warta/internal/clientip"
 	"warta/internal/dto"
 	"warta/internal/response"
 	"warta/internal/service"
@@ -52,7 +52,7 @@ func (h *ArticleHandler) RecordView(w http.ResponseWriter, r *http.Request) {
 	}
 
 	actor := auth.ActorFrom(r.Context())
-	viewer := "ip:" + remoteIP(r)
+	viewer := "ip:" + clientip.From(r)
 	if actor.Authenticated() {
 		viewer = "user:" + strconv.FormatInt(actor.ID, 10)
 	}
@@ -66,14 +66,6 @@ func (h *ArticleHandler) RecordView(w http.ResponseWriter, r *http.Request) {
 
 func (h *ArticleHandler) ListBookmarks(w http.ResponseWriter, r *http.Request) {
 	h.list(w, r, h.service.ListBookmarks)
-}
-
-func remoteIP(r *http.Request) string {
-	host, _, err := net.SplitHostPort(r.RemoteAddr)
-	if err != nil {
-		return r.RemoteAddr
-	}
-	return host
 }
 
 type StatsHandler struct {

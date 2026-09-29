@@ -793,6 +793,10 @@ paths:
       operationId: createComment
       tags: [Komentar]
       summary: Berkomentar (semua role, hanya di artikel yang sudah terbit)
+      description: |
+        Aturan anti-spam: paling banyak 2 tautan, tidak seluruhnya huruf
+        kapital, komentar yang sama persis dalam 10 menit ditolak (409), dan
+        tiap akun dibatasi `COMMENT_RATE_LIMIT` komentar per menit (429).
       security: [{ bearerAuth: [] }]
       parameters: [{ $ref: "#/components/parameters/Id" }]
       requestBody:
@@ -806,6 +810,97 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/CommentEnvelope" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "422": { $ref: "#/components/responses/ValidationFailed" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
+  /api/v1/comments/{id}/report:
+    post:
+      operationId: reportComment
+      tags: [Komentar]
+      summary: Melaporkan komentar
+      description: |
+        Satu laporan per akun per komentar; laporan ulang tidak menambah
+        hitungan. Komentar sendiri tidak bisa dilaporkan. Bila laporan dari akun
+        berbeda mencapai `COMMENT_HIDE_THRESHOLD` (bawaan 3), komentar
+        disembunyikan otomatis sampai admin meninjaunya.
+      security: [{ bearerAuth: [] }]
+      parameters: [{ $ref: "#/components/parameters/Id" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [reason]
+              properties:
+                reason: { type: string, enum: [spam, abusive, other] }
+      responses:
+        "200":
+          description: Laporan tercatat
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: object
+                    properties:
+                      reported: { type: boolean }
+                      hidden: { type: boolean, description: Komentar kini disembunyikan }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "422": { $ref: "#/components/responses/ValidationFailed" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
+  /api/v1/moderation/comments:
+    get:
+      operationId: listReportedComments
+      tags: [Komentar]
+      summary: Antrean moderasi (admin)
+      description: Komentar yang dilaporkan atau disembunyikan, dari yang paling banyak dilaporkan.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - $ref: "#/components/parameters/Page"
+        - $ref: "#/components/parameters/PerPage"
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items: { $ref: "#/components/schemas/ReportedComment" }
+                  meta: { $ref: "#/components/schemas/PaginationMeta" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /api/v1/moderation/comments/{id}:
+    post:
+      operationId: moderateComment
+      tags: [Komentar]
+      summary: Meninjau komentar (admin)
+      description: |
+        `approve` menampilkan kembali komentar dan menghapus laporannya.
+        `hide` menyembunyikan komentar dari publik. Untuk menghapus permanen,
+        pakai DELETE /api/v1/comments/{id}.
+      security: [{ bearerAuth: [] }]
+      parameters: [{ $ref: "#/components/parameters/Id" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [action]
+              properties:
+                action: { type: string, enum: [approve, hide] }
+      responses:
+        "204": { description: Berhasil }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/Forbidden" }
         "404": { $ref: "#/components/responses/NotFound" }
@@ -1121,6 +1216,26 @@ components:
               views: { type: integer }
               likes: { type: integer }
               comments: { type: integer }
+    ReportedComment:
+      allOf:
+        - $ref: "#/components/schemas/Comment"
+        - type: object
+          properties:
+            article:
+              type: object
+              properties:
+                id: { type: integer, format: int64 }
+                title: { type: string }
+                slug: { type: string }
+            hidden: { type: boolean }
+            reports: { type: integer }
+            reasons:
+              type: object
+              properties:
+                spam: { type: integer }
+                abusive: { type: integer }
+                other: { type: integer }
+            last_reported_at: { type: string, format: date-time, nullable: true }
     Comment:
       type: object
       properties:

@@ -41,21 +41,24 @@ func testConfig(t *testing.T) config.Config {
 	}
 
 	cfg := config.Config{
-		DefaultPerPage:  10,
-		MaxPerPage:      50,
-		CORSOrigins:     []string{"*"},
-		JWTSecret:       "rahasia-test-yang-panjangnya-lebih-dari-32",
-		JWTIssuer:       "warta-test",
-		AccessTokenTTL:  time.Minute,
-		RefreshTokenTTL: time.Hour,
-		AuthRateLimit:   1000,
-		UploadDir:       t.TempDir(),
-		MaxUploadBytes:  1 << 20,
-		DBHost:          host,
-		DBPort:          envOr("TEST_DB_PORT", "3306"),
-		DBUser:          envOr("TEST_DB_USER", "root"),
-		DBPassword:      os.Getenv("TEST_DB_PASSWORD"),
-		DBName:          fmt.Sprintf("warta_test_%d", time.Now().UnixNano()),
+		DefaultPerPage:       10,
+		MaxPerPage:           50,
+		CORSOrigins:          []string{"*"},
+		JWTSecret:            "rahasia-test-yang-panjangnya-lebih-dari-32",
+		JWTIssuer:            "warta-test",
+		AccessTokenTTL:       time.Minute,
+		RefreshTokenTTL:      time.Hour,
+		AuthRateLimit:        1000,
+		CommentRateLimit:     1000,
+		UploadRateLimit:      1000,
+		CommentHideThreshold: 2,
+		UploadDir:            t.TempDir(),
+		MaxUploadBytes:       1 << 20,
+		DBHost:               host,
+		DBPort:               envOr("TEST_DB_PORT", "3306"),
+		DBUser:               envOr("TEST_DB_USER", "root"),
+		DBPassword:           os.Getenv("TEST_DB_PASSWORD"),
+		DBName:               fmt.Sprintf("warta_test_%d", time.Now().UnixNano()),
 	}
 
 	ctx := context.Background()
@@ -97,7 +100,7 @@ func migrate(t *testing.T, cfg config.Config, target uint) {
 	}
 }
 
-const latestVersion = 10
+const latestVersion = 11
 
 type client struct {
 	t    *testing.T
@@ -129,6 +132,28 @@ func (c client) upload(token string, data []byte) result {
 		c.t.Fatal(err)
 	}
 	req.Header.Set("Content-Type", form.FormDataContentType())
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+	return c.send(req)
+}
+
+// doFrom sama dengan do, tapi seolah-olah lewat reverse proxy yang
+// meneruskan IP pengunjung di X-Forwarded-For.
+func (c client) doFrom(ip, method, path, token string, body any) result {
+	c.t.Helper()
+
+	var reader io.Reader
+	if body != nil {
+		b, _ := json.Marshal(body)
+		reader = bytes.NewReader(b)
+	}
+	req, err := http.NewRequest(method, c.base+path, reader)
+	if err != nil {
+		c.t.Fatal(err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Forwarded-For", ip)
 	if token != "" {
 		req.Header.Set("Authorization", "Bearer "+token)
 	}
@@ -757,6 +782,145 @@ func TestAPI(t *testing.T) {
 		if all.Scope != "all" || all.Users["reader"] != 1 || len(all.Daily) != 7 ||
 			len(all.TopArticles) == 0 || all.TopArticles[0].ID != published.ID {
 			t.Fatalf("statistik admin: %+v", all)
+		}
+	})
+
+	t.Run("spam dan moderasi komentar", func(t *testing.T) {
+		c := client{t: t, base: server.URL}
+		path := fmt.Sprintf("/api/v1/articles/%d/comments", published.ID)
+
+		for _, body := range []string{
+			"Kunjungi https://a.example, https://b.example, dan www.c.example sekarang",
+			"INI KOMENTAR YANG SELURUHNYA DITULIS KAPITAL",
+		} {
+			c.do("POST", path, reader.AccessToken, map[string]string{"body": body}).
+				expectError(http.StatusUnprocessableEntity, "validation_failed")
+		}
+
+		var target comment
+		c.do("POST", path, writer.AccessToken, map[string]string{"body": "Komentar yang nanti dilaporkan"}).
+			expect(http.StatusCreated, &target)
+		c.do("POST", path, writer.AccessToken, map[string]string{"body": "Komentar yang nanti dilaporkan"}).
+			expectError(http.StatusConflict, "conflict")
+
+		report := fmt.Sprintf("/api/v1/comments/%d/report", target.ID)
+		c.do("POST", report, "", map[string]string{"reason": "spam"}).expectError(http.StatusUnauthorized, "unauthorized")
+		c.do("POST", report, writer.AccessToken, map[string]string{"reason": "spam"}).expectError(http.StatusForbidden, "forbidden")
+		c.do("POST", report, reader.AccessToken, map[string]string{"reason": "iklan"}).
+			expectError(http.StatusUnprocessableEntity, "validation_failed")
+
+		var result struct{ Reported, Hidden bool }
+		c.do("POST", report, reader.AccessToken, map[string]string{"reason": "spam"}).expect(http.StatusOK, &result)
+		c.do("POST", report, reader.AccessToken, map[string]string{"reason": "spam"}).expect(http.StatusOK, &result)
+		if !result.Reported || result.Hidden {
+			t.Fatalf("satu pelapor belum menyembunyikan komentar: %+v", result)
+		}
+
+		// Pelapor kedua mencapai ambang (2 di test ini).
+		c.do("POST", report, admin.AccessToken, map[string]string{"reason": "abusive"}).expect(http.StatusOK, &result)
+		if !result.Hidden {
+			t.Fatalf("komentar seharusnya disembunyikan: %+v", result)
+		}
+
+		visible := func() bool {
+			var comments []comment
+			c.do("GET", path, "", nil).expect(http.StatusOK, &comments)
+			for _, cm := range comments {
+				if cm.ID == target.ID {
+					return true
+				}
+			}
+			return false
+		}
+		if visible() {
+			t.Fatal("komentar tersembunyi masih tampil")
+		}
+		var art article
+		c.do("GET", fmt.Sprintf("/api/v1/articles/%d", published.ID), "", nil).expect(http.StatusOK, &art)
+		if art.CommentCount != 0 {
+			t.Fatalf("comment_count menghitung komentar tersembunyi: %d", art.CommentCount)
+		}
+
+		c.do("GET", "/api/v1/moderation/comments", reader.AccessToken, nil).expectError(http.StatusForbidden, "forbidden")
+
+		var queue []struct {
+			ID      int64          `json:"id"`
+			Hidden  bool           `json:"hidden"`
+			Reports int            `json:"reports"`
+			Reasons map[string]int `json:"reasons"`
+			Article struct {
+				Slug string `json:"slug"`
+			} `json:"article"`
+		}
+		res := c.do("GET", "/api/v1/moderation/comments", admin.AccessToken, nil).expect(http.StatusOK, &queue)
+		if len(queue) != 1 || res.meta().Total != 1 || queue[0].ID != target.ID || !queue[0].Hidden ||
+			queue[0].Reports != 2 || queue[0].Reasons["spam"] != 1 || queue[0].Reasons["abusive"] != 1 ||
+			queue[0].Article.Slug != published.Slug {
+			t.Fatalf("antrean moderasi: %+v", queue)
+		}
+
+		moderate := fmt.Sprintf("/api/v1/moderation/comments/%d", target.ID)
+		c.do("POST", moderate, admin.AccessToken, map[string]string{"action": "hapus"}).
+			expectError(http.StatusUnprocessableEntity, "validation_failed")
+		c.do("POST", moderate, admin.AccessToken, map[string]string{"action": "approve"}).expect(http.StatusNoContent, nil)
+		if !visible() {
+			t.Fatal("komentar yang disetujui seharusnya tampil lagi")
+		}
+		c.do("GET", "/api/v1/moderation/comments", admin.AccessToken, nil).expect(http.StatusOK, &queue)
+		if len(queue) != 0 {
+			t.Fatalf("laporan seharusnya dibersihkan: %+v", queue)
+		}
+
+		c.do("POST", moderate, admin.AccessToken, map[string]string{"action": "hide"}).expect(http.StatusNoContent, nil)
+		if visible() {
+			t.Fatal("admin seharusnya bisa menyembunyikan langsung")
+		}
+		c.do("DELETE", fmt.Sprintf("/api/v1/comments/%d", target.ID), admin.AccessToken, nil).expect(http.StatusNoContent, nil)
+	})
+
+	t.Run("batas per akun dan IP di balik proxy", func(t *testing.T) {
+		limited := cfg
+		limited.CommentRateLimit = 2
+		limited.AuthRateLimit = 2
+		limited.TrustedProxies = []string{"127.0.0.1", "::1"}
+		a2, err := app.New(limited, db, auth.BcryptHasher{Cost: bcrypt.MinCost})
+		if err != nil {
+			t.Fatal(err)
+		}
+		proxied := httptest.NewServer(a2.Handler)
+		defer proxied.Close()
+		c := client{t: t, base: proxied.URL}
+
+		path := fmt.Sprintf("/api/v1/articles/%d/comments", published.ID)
+		for i := 1; i <= 2; i++ {
+			c.do("POST", path, reader.AccessToken, map[string]string{"body": fmt.Sprintf("Komentar cepat ke-%d", i)}).
+				expect(http.StatusCreated, nil)
+		}
+		res := c.do("POST", path, reader.AccessToken, map[string]string{"body": "Komentar cepat ke-3"})
+		res.expectError(http.StatusTooManyRequests, "too_many_requests")
+		if res.header.Get("Retry-After") == "" {
+			t.Fatal("Retry-After seharusnya diisi")
+		}
+		// Batas komentar per akun, akun lain tidak ikut terkena.
+		c.do("POST", path, writer.AccessToken, map[string]string{"body": "Komentar dari akun lain"}).expect(http.StatusCreated, nil)
+
+		// Batas login per IP asli pengunjung, bukan per IP proxy.
+		wrong := map[string]string{"email": "pembaca@warta.test", "password": "salah-sekali"}
+		c.doFrom("198.51.100.1", "POST", "/api/v1/auth/login", "", wrong).expectError(http.StatusUnauthorized, "unauthorized")
+		c.doFrom("198.51.100.1", "POST", "/api/v1/auth/login", "", wrong).expectError(http.StatusUnauthorized, "unauthorized")
+		c.doFrom("198.51.100.1", "POST", "/api/v1/auth/login", "", wrong).expectError(http.StatusTooManyRequests, "too_many_requests")
+		c.doFrom("198.51.100.2", "POST", "/api/v1/auth/login", "", wrong).expectError(http.StatusUnauthorized, "unauthorized")
+
+		// Pengunjung anonim dari IP berbeda dihitung terpisah.
+		var before, after article
+		view := fmt.Sprintf("/api/v1/articles/%d/view", published.ID)
+		c.do("GET", fmt.Sprintf("/api/v1/articles/%d", published.ID), "", nil).expect(http.StatusOK, &before)
+		c.doFrom("198.51.100.3", "POST", view, "", nil).expect(http.StatusNoContent, nil)
+		c.doFrom("198.51.100.4", "POST", view, "", nil).expect(http.StatusNoContent, nil)
+		c.doFrom("198.51.100.4", "POST", view, "", nil).expect(http.StatusNoContent, nil)
+		c.do("GET", fmt.Sprintf("/api/v1/articles/%d", published.ID), "", nil).expect(http.StatusOK, &after)
+		if after.ViewCount != before.ViewCount+2 {
+			t.Fatalf("view_count %d -> %d, ingin +2", before.ViewCount, after.ViewCount)
 		}
 	})
 

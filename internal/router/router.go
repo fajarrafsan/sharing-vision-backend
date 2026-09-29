@@ -5,6 +5,7 @@ import (
 
 	"warta/internal/apperr"
 	"warta/internal/auth"
+	"warta/internal/clientip"
 	"warta/internal/handler"
 	"warta/internal/middleware"
 	"warta/internal/model"
@@ -25,10 +26,14 @@ type Handlers struct {
 }
 
 type Options struct {
-	Tokens       *auth.TokenManager
-	CORSOrigins  []string
-	AuthLimiter  *middleware.RateLimiter
-	MaxBodyBytes int64
+	Tokens      *auth.TokenManager
+	CORSOrigins []string
+	AuthLimiter *middleware.RateLimiter
+	// CommentLimiter dan UploadLimiter menghitung per akun.
+	CommentLimiter *middleware.RateLimiter
+	UploadLimiter  *middleware.RateLimiter
+	ClientIP       *clientip.Resolver
+	MaxBodyBytes   int64
 	// MaxUploadBytes adalah batas body untuk upload gambar, sedikit di atas
 	// batas berkasnya untuk memberi ruang bagi header multipart.
 	MaxUploadBytes int64
@@ -42,6 +47,9 @@ func New(h Handlers, opt Options) http.Handler {
 		admin    = middleware.RequireRole(model.RoleAdmin)
 		writer   = middleware.RequireRole(model.RoleAdmin, model.RoleAuthor)
 		limited  = middleware.RateLimit(opt.AuthLimiter)
+
+		commentLimited = middleware.RateLimitPerUser(opt.CommentLimiter, "terlalu banyak komentar dalam waktu singkat, tunggu sebentar")
+		uploadLimited  = middleware.RateLimitPerUser(opt.UploadLimiter, "terlalu banyak upload dalam waktu singkat, tunggu sebentar")
 	)
 
 	// Setiap rute membatasi ukuran body. Rute upload memakai batasnya sendiri.
@@ -70,7 +78,7 @@ func New(h Handlers, opt Options) http.Handler {
 	route("GET /api/v1/me/bookmarks", h.Articles.ListBookmarks, signedIn)
 	route("GET /api/v1/stats", h.Stats.Overview, signedIn, writer)
 
-	routeWithLimit(opt.MaxUploadBytes, "POST /api/v1/uploads", h.Uploads.Create, signedIn, writer)
+	routeWithLimit(opt.MaxUploadBytes, "POST /api/v1/uploads", h.Uploads.Create, signedIn, writer, uploadLimited)
 	route("GET /uploads/{name}", h.Uploads.Serve)
 
 	route("GET /api/v1/users", h.Users.List, signedIn, admin)
@@ -102,11 +110,15 @@ func New(h Handlers, opt Options) http.Handler {
 	route("POST /api/v1/articles/{id}/view", h.Articles.RecordView)
 
 	route("GET /api/v1/articles/{id}/comments", h.Comments.List)
-	route("POST /api/v1/articles/{id}/comments", h.Comments.Create, signedIn)
-	route("PATCH /api/v1/comments/{id}", h.Comments.Update, signedIn)
+	route("POST /api/v1/articles/{id}/comments", h.Comments.Create, signedIn, commentLimited)
+	route("PATCH /api/v1/comments/{id}", h.Comments.Update, signedIn, commentLimited)
+	route("POST /api/v1/comments/{id}/report", h.Comments.Report, signedIn, commentLimited)
+	route("GET /api/v1/moderation/comments", h.Comments.ListReported, signedIn, admin)
+	route("POST /api/v1/moderation/comments/{id}", h.Comments.Moderate, signedIn, admin)
 	route("DELETE /api/v1/comments/{id}", h.Comments.Delete, signedIn)
 
 	return middleware.Chain(jsonFallback(mux),
+		opt.ClientIP.Middleware,
 		middleware.RequestID,
 		middleware.Logger,
 		middleware.Recover,

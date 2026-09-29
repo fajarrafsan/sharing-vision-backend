@@ -11,14 +11,40 @@ import (
 
 	"github.com/go-sql-driver/mysql"
 	"github.com/joho/godotenv"
+
+	"warta/internal/clientip"
+)
+
+const (
+	EnvDevelopment = "development"
+	EnvProduction  = "production"
+)
+
+// Nilai contoh di docker-compose.yml dan README. Boleh dipakai untuk mencoba
+// di komputer sendiri, tapi ditolak saat APP_ENV=production.
+var (
+	placeholderSecrets = map[string]bool{
+		"ganti-dengan-rahasia-acak-minimal-32-karakter":     true,
+		"dev-secret-yang-panjangnya-lebih-dari-32-karakter": true,
+	}
+	weakPasswords = map[string]bool{
+		"": true, "root": true, "admin": true, "admin123": true, "admin12345": true,
+		"password": true, "password123": true, "rahasia123": true, "12345678": true,
+	}
 )
 
 type Config struct {
+	// Env adalah development atau production. Production menolak nilai
+	// bawaan yang tidak aman.
+	Env         string
 	AppPort     string
 	AutoMigrate bool
 	LogFormat   string
 	LogLevel    string
 	CORSOrigins []string
+	// TrustedProxies adalah IP atau CIDR reverse proxy yang boleh mengisi
+	// X-Forwarded-For. Kosong berarti service diakses langsung.
+	TrustedProxies []string
 
 	DefaultPerPage int
 	MaxPerPage     int
@@ -31,6 +57,13 @@ type Config struct {
 	// AuthRateLimit adalah jumlah permintaan per menit per IP ke endpoint
 	// register, login, dan refresh.
 	AuthRateLimit int
+	// CommentRateLimit adalah jumlah komentar dan laporan per menit per akun.
+	CommentRateLimit int
+	// UploadRateLimit adalah jumlah upload gambar per menit per akun.
+	UploadRateLimit int
+	// CommentHideThreshold adalah jumlah laporan dari akun berbeda yang
+	// membuat komentar disembunyikan otomatis sampai ditinjau admin.
+	CommentHideThreshold int
 
 	// UploadDir adalah folder gambar sampul yang diunggah.
 	UploadDir      string
@@ -54,11 +87,13 @@ func Load() (Config, error) {
 
 	var l loader
 	cfg := Config{
-		AppPort:     l.str("APP_PORT", "8080"),
-		AutoMigrate: l.boolean("AUTO_MIGRATE", true),
-		LogFormat:   l.oneOf("LOG_FORMAT", "text", "text", "json"),
-		LogLevel:    l.oneOf("LOG_LEVEL", "info", "debug", "info", "warn", "error"),
-		CORSOrigins: l.list("CORS_ORIGINS", "*"),
+		Env:            l.oneOf("APP_ENV", EnvDevelopment, EnvDevelopment, EnvProduction),
+		AppPort:        l.str("APP_PORT", "8080"),
+		AutoMigrate:    l.boolean("AUTO_MIGRATE", true),
+		LogFormat:      l.oneOf("LOG_FORMAT", "text", "text", "json"),
+		LogLevel:       l.oneOf("LOG_LEVEL", "info", "debug", "info", "warn", "error"),
+		CORSOrigins:    l.list("CORS_ORIGINS", "*"),
+		TrustedProxies: l.list("TRUSTED_PROXIES", ""),
 
 		DefaultPerPage: l.integer("DEFAULT_PER_PAGE", 10),
 		MaxPerPage:     l.integer("MAX_PER_PAGE", 100),
@@ -68,6 +103,10 @@ func Load() (Config, error) {
 		AccessTokenTTL:  l.duration("ACCESS_TOKEN_TTL", 15*time.Minute),
 		RefreshTokenTTL: l.duration("REFRESH_TOKEN_TTL", 7*24*time.Hour),
 		AuthRateLimit:   l.integer("AUTH_RATE_LIMIT", 20),
+
+		CommentRateLimit:     l.integer("COMMENT_RATE_LIMIT", 5),
+		UploadRateLimit:      l.integer("UPLOAD_RATE_LIMIT", 10),
+		CommentHideThreshold: l.integer("COMMENT_HIDE_THRESHOLD", 3),
 
 		UploadDir:      l.str("UPLOAD_DIR", "uploads"),
 		MaxUploadBytes: int64(l.integer("MAX_UPLOAD_MB", 2)) << 20,
@@ -83,26 +122,74 @@ func Load() (Config, error) {
 		DBName:     l.str("DB_NAME", "warta"),
 	}
 
-	if len(cfg.JWTSecret) < 32 {
+	cfg.validate(&l)
+	return cfg, l.err()
+}
+
+func (c Config) validate(l *loader) {
+	if len(c.JWTSecret) < 32 {
 		l.fail("JWT_SECRET wajib diisi, minimal 32 karakter")
 	}
-	if cfg.DefaultPerPage < 1 || cfg.MaxPerPage < cfg.DefaultPerPage {
+	if c.DefaultPerPage < 1 || c.MaxPerPage < c.DefaultPerPage {
 		l.fail("DEFAULT_PER_PAGE minimal 1 dan tidak boleh melebihi MAX_PER_PAGE")
 	}
-	if cfg.MaxUploadBytes < 1<<20 || cfg.MaxUploadBytes > 20<<20 {
+	if c.MaxUploadBytes < 1<<20 || c.MaxUploadBytes > 20<<20 {
 		l.fail("MAX_UPLOAD_MB harus antara 1 dan 20")
 	}
-	if cfg.AuthRateLimit < 1 {
-		l.fail("AUTH_RATE_LIMIT minimal 1")
+	for key, value := range map[string]int{
+		"AUTH_RATE_LIMIT":        c.AuthRateLimit,
+		"COMMENT_RATE_LIMIT":     c.CommentRateLimit,
+		"UPLOAD_RATE_LIMIT":      c.UploadRateLimit,
+		"COMMENT_HIDE_THRESHOLD": c.CommentHideThreshold,
+	} {
+		if value < 1 {
+			l.fail("%s minimal 1", key)
+		}
 	}
-	if (cfg.AdminEmail == "") != (cfg.AdminPassword == "") {
+	if _, err := clientip.NewResolver(c.TrustedProxies); err != nil {
+		l.fail("TRUSTED_PROXIES: %v", err)
+	}
+	if (c.AdminEmail == "") != (c.AdminPassword == "") {
 		l.fail("ADMIN_EMAIL dan ADMIN_PASSWORD harus diisi berdua atau dikosongkan berdua")
 	}
-	if cfg.AdminPassword != "" && (len(cfg.AdminPassword) < 8 || len(cfg.AdminPassword) > 72) {
+	if c.AdminPassword != "" && (len(c.AdminPassword) < 8 || len(c.AdminPassword) > 72) {
 		l.fail("ADMIN_PASSWORD harus 8 sampai 72 karakter")
 	}
 
-	return cfg, l.err()
+	if c.Env != EnvProduction {
+		return
+	}
+	if placeholderSecrets[c.JWTSecret] {
+		l.fail("JWT_SECRET masih nilai contoh; buat yang acak, misalnya: openssl rand -base64 48")
+	}
+	if c.AdminPassword != "" && (len(c.AdminPassword) < 12 || weakPasswords[strings.ToLower(c.AdminPassword)]) {
+		l.fail("ADMIN_PASSWORD terlalu lemah untuk production, minimal 12 karakter dan bukan nilai contoh")
+	}
+	if weakPasswords[strings.ToLower(c.DBPassword)] {
+		l.fail("DB_PASSWORD kosong atau masih nilai contoh")
+	}
+	for _, origin := range c.CORSOrigins {
+		if origin == "*" {
+			l.fail("CORS_ORIGINS tidak boleh * di production; isi dengan origin frontend")
+		}
+	}
+}
+
+// Warnings adalah hal yang tidak menghentikan service tapi sebaiknya
+// diperbaiki. Dicatat ke log saat service menyala.
+func (c Config) Warnings() []string {
+	if c.Env == EnvProduction {
+		return nil
+	}
+
+	var warnings []string
+	if placeholderSecrets[c.JWTSecret] {
+		warnings = append(warnings, "JWT_SECRET masih nilai contoh; hanya aman untuk mencoba di komputer sendiri")
+	}
+	if weakPasswords[strings.ToLower(c.AdminPassword)] && c.AdminPassword != "" {
+		warnings = append(warnings, "ADMIN_PASSWORD masih nilai contoh; ganti sebelum dipakai orang lain")
+	}
+	return warnings
 }
 
 // DSN dipakai service. multiStatements sengaja tidak dinyalakan di sini.

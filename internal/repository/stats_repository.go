@@ -65,7 +65,7 @@ func (r *statsRepository) Totals(ctx context.Context, authorID int64) (Totals, e
 		       COALESCE(SUM(a.status = 'archived'), 0),
 		       COALESCE(SUM(a.view_count), 0),
 		       (SELECT COUNT(*) FROM article_likes al JOIN articles a ON a.id = al.article_id WHERE `+authorScope+`),
-		       (SELECT COUNT(*) FROM comments cm JOIN articles a ON a.id = cm.article_id WHERE `+authorScope+`),
+		       (SELECT COUNT(*) FROM comments cm JOIN articles a ON a.id = cm.article_id WHERE cm.hidden_at IS NULL AND `+authorScope+`),
 		       (SELECT COUNT(*) FROM bookmarks b JOIN articles a ON a.id = b.article_id WHERE `+authorScope+`)
 		FROM articles a
 		WHERE `+authorScope,
@@ -86,7 +86,7 @@ func (r *statsRepository) Daily(ctx context.Context, authorID int64, from time.T
 			UNION ALL
 			SELECT DATE(cm.created_at), 0, 1, 0
 			FROM comments cm JOIN articles a ON a.id = cm.article_id
-			WHERE cm.created_at >= ? AND `+authorScope+`
+			WHERE cm.created_at >= ? AND cm.hidden_at IS NULL AND `+authorScope+`
 			UNION ALL
 			SELECT DATE(a.published_at), 0, 0, 1
 			FROM articles a

@@ -33,6 +33,9 @@ func run() error {
 	}
 
 	slog.SetDefault(logging.New(os.Stdout, cfg.LogFormat, cfg.LogLevel))
+	for _, warning := range cfg.Warnings() {
+		slog.Warn(warning)
+	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -55,7 +58,7 @@ func run() error {
 
 	a, err := app.New(cfg, db, auth.BcryptHasher{Cost: bcrypt.DefaultCost})
 	if err != nil {
-		return errors.Join(errors.New("gagal menyiapkan folder upload"), err)
+		return errors.Join(errors.New("gagal menyiapkan service"), err)
 	}
 
 	if cfg.AdminEmail != "" {

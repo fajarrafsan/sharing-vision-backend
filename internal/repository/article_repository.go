@@ -19,7 +19,7 @@ const (
 
 const (
 	likeCountSQL    = "(SELECT COUNT(*) FROM article_likes al WHERE al.article_id = a.id)"
-	commentCountSQL = "(SELECT COUNT(*) FROM comments cm WHERE cm.article_id = a.id)"
+	commentCountSQL = "(SELECT COUNT(*) FROM comments cm WHERE cm.article_id = a.id AND cm.hidden_at IS NULL)"
 )
 
 var articleOrder = map[string]string{

@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"warta/internal/auth"
+	"warta/internal/clientip"
 	"warta/internal/config"
 	"warta/internal/handler"
 	"warta/internal/middleware"
@@ -34,6 +35,10 @@ func New(cfg config.Config, db *sql.DB, hasher auth.PasswordHasher) (*App, error
 	if err != nil {
 		return nil, err
 	}
+	resolver, err := clientip.NewResolver(cfg.TrustedProxies)
+	if err != nil {
+		return nil, err
+	}
 
 	pages := pagination.Parser{DefaultPerPage: cfg.DefaultPerPage, MaxPerPage: cfg.MaxPerPage}
 	tokens := auth.NewTokenManager(cfg.JWTSecret, cfg.JWTIssuer, cfg.AccessTokenTTL)
@@ -56,7 +61,7 @@ func New(cfg config.Config, db *sql.DB, hasher auth.PasswordHasher) (*App, error
 		Categories: handler.NewCategoryHandler(service.NewCategoryService(categories)),
 		Tags:       handler.NewTagHandler(service.NewTagService(tags), pages),
 		Articles:   handler.NewArticleHandler(service.NewArticleService(articles, categories, engagement, uploads), pages),
-		Comments:   handler.NewCommentHandler(service.NewCommentService(comments, articles), pages),
+		Comments:   handler.NewCommentHandler(service.NewCommentService(comments, articles, cfg.CommentHideThreshold), pages),
 		Stats:      handler.NewStatsHandler(service.NewStatsService(repository.NewStatsRepository(db))),
 		Uploads:    handler.NewUploadHandler(uploads),
 	}
@@ -66,6 +71,9 @@ func New(cfg config.Config, db *sql.DB, hasher auth.PasswordHasher) (*App, error
 			Tokens:         tokens,
 			CORSOrigins:    cfg.CORSOrigins,
 			AuthLimiter:    middleware.NewRateLimiter(cfg.AuthRateLimit),
+			CommentLimiter: middleware.NewRateLimiter(cfg.CommentRateLimit),
+			UploadLimiter:  middleware.NewRateLimiter(cfg.UploadRateLimit),
+			ClientIP:       resolver,
 			MaxBodyBytes:   maxBodyBytes,
 			MaxUploadBytes: cfg.MaxUploadBytes + 64<<10,
 		}),

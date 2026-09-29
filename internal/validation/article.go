@@ -11,6 +11,12 @@ import (
 // coverPattern sama dengan nama berkas buatan storage.Local.
 var coverPattern = regexp.MustCompile(`^/uploads/[a-f0-9]{32}\.(jpg|png|webp|gif)$`)
 
+// linkPattern mengenali tautan di komentar. Komentar spam hampir selalu
+// membawa banyak tautan.
+var linkPattern = regexp.MustCompile(`(?i)(https?://|www\.)`)
+
+const maxCommentLinks = 2
+
 const (
 	maxTags        = 10
 	maxContentLen  = 100_000
@@ -102,8 +108,42 @@ func ValidateComment(r dto.CommentRequest) map[string]string {
 		problems["body"] = "body wajib diisi"
 	case n > maxCommentLen:
 		problems["body"] = fmt.Sprintf("body maksimal %d karakter", maxCommentLen)
+	case len(linkPattern.FindAllStringIndex(r.Body, -1)) > maxCommentLinks:
+		problems["body"] = fmt.Sprintf("komentar paling banyak berisi %d tautan", maxCommentLinks)
+	case shouting(r.Body):
+		problems["body"] = "komentar tidak boleh ditulis seluruhnya dengan huruf besar"
 	}
 
+	return problems
+}
+
+// shouting menandai komentar panjang yang seluruh hurufnya kapital.
+func shouting(body string) bool {
+	letters, upper := 0, 0
+	for _, r := range body {
+		if r >= 'a' && r <= 'z' {
+			letters++
+		} else if r >= 'A' && r <= 'Z' {
+			letters++
+			upper++
+		}
+	}
+	return letters >= 20 && upper == letters
+}
+
+func ValidateReport(r dto.ReportRequest) map[string]string {
+	problems := make(map[string]string)
+	if !model.ValidReportReason(r.Reason) {
+		problems["reason"] = "reason harus spam, abusive, atau other"
+	}
+	return problems
+}
+
+func ValidateModeration(r dto.ModerationRequest) map[string]string {
+	problems := make(map[string]string)
+	if r.Action != "approve" && r.Action != "hide" {
+		problems["action"] = "action harus approve atau hide"
+	}
 	return problems
 }
 

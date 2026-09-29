@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"warta/internal/apperr"
+	"warta/internal/clientip"
 	"warta/internal/logging"
 	"warta/internal/response"
 )
@@ -63,6 +64,7 @@ func Logger(next http.Handler) http.Handler {
 		slog.Log(r.Context(), level, "http",
 			"method", r.Method,
 			"path", r.URL.Path,
+			"ip", clientip.From(r),
 			"status", rec.status,
 			"bytes", rec.bytes,
 			"duration", time.Since(start).String(),

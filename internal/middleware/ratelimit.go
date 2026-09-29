@@ -2,13 +2,14 @@ package middleware
 
 import (
 	"math"
-	"net"
 	"net/http"
 	"strconv"
 	"sync"
 	"time"
 
 	"warta/internal/apperr"
+	"warta/internal/auth"
+	"warta/internal/clientip"
 	"warta/internal/response"
 )
 
@@ -83,27 +84,32 @@ func (l *RateLimiter) sweep(now time.Time) {
 	}
 }
 
+// RateLimit membatasi per IP pengunjung (lihat clientip).
 func RateLimit(l *RateLimiter) Middleware {
+	return rateLimit(l, "terlalu banyak percobaan, coba lagi sebentar lagi", func(r *http.Request) string {
+		return "ip:" + clientip.From(r)
+	})
+}
+
+// RateLimitPerUser membatasi per akun, supaya satu akun tidak bisa membanjiri
+// dengan berganti IP. Dipasang setelah RequireAuth.
+func RateLimitPerUser(l *RateLimiter, message string) Middleware {
+	return rateLimit(l, message, func(r *http.Request) string {
+		return "user:" + strconv.FormatInt(auth.ActorFrom(r.Context()).ID, 10)
+	})
+}
+
+func rateLimit(l *RateLimiter, message string, key func(*http.Request) string) Middleware {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			ok, retryAfter := l.Allow(clientIP(r))
+			ok, retryAfter := l.Allow(key(r))
 			if !ok {
 				seconds := int(math.Ceil(retryAfter.Seconds()))
 				w.Header().Set("Retry-After", strconv.Itoa(max(seconds, 1)))
-				response.Error(w, r, apperr.TooManyRequests("terlalu banyak percobaan, coba lagi sebentar lagi"))
+				response.Error(w, r, apperr.TooManyRequests(message))
 				return
 			}
 			next.ServeHTTP(w, r)
 		})
 	}
-}
-
-// clientIP memakai alamat koneksi langsung. Header seperti X-Forwarded-For
-// sengaja tidak dipercaya karena bisa diisi sembarangan oleh klien.
-func clientIP(r *http.Request) string {
-	host, _, err := net.SplitHostPort(r.RemoteAddr)
-	if err != nil {
-		return r.RemoteAddr
-	}
-	return host
 }

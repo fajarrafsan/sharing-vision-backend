@@ -100,11 +100,13 @@ CREATE TABLE IF NOT EXISTS comments (
     article_id BIGINT UNSIGNED NOT NULL,
     user_id    BIGINT UNSIGNED NOT NULL,
     body       TEXT            NOT NULL,
+    hidden_at  TIMESTAMP       NULL DEFAULT NULL,
     created_at TIMESTAMP       NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP       NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
     PRIMARY KEY (id),
     KEY idx_comments_article_created (article_id, created_at),
     KEY idx_comments_user (user_id),
+    KEY idx_comments_hidden (hidden_at),
     CONSTRAINT fk_comments_article FOREIGN KEY (article_id) REFERENCES articles (id) ON DELETE CASCADE,
     CONSTRAINT fk_comments_user FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE CASCADE
 ) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4 COLLATE = utf8mb4_unicode_ci;
@@ -136,4 +138,16 @@ CREATE TABLE IF NOT EXISTS bookmarks (
     KEY idx_bookmarks_article (article_id),
     CONSTRAINT fk_bookmarks_user FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE CASCADE,
     CONSTRAINT fk_bookmarks_article FOREIGN KEY (article_id) REFERENCES articles (id) ON DELETE CASCADE
+) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4 COLLATE = utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS comment_reports (
+    comment_id BIGINT UNSIGNED NOT NULL,
+    user_id    BIGINT UNSIGNED NOT NULL,
+    reason     VARCHAR(20)     NOT NULL,
+    created_at TIMESTAMP       NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (comment_id, user_id),
+    KEY idx_comment_reports_user (user_id),
+    CONSTRAINT chk_comment_reports_reason CHECK (reason IN ('spam', 'abusive', 'other')),
+    CONSTRAINT fk_comment_reports_comment FOREIGN KEY (comment_id) REFERENCES comments (id) ON DELETE CASCADE,
+    CONSTRAINT fk_comment_reports_user FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE CASCADE
 ) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4 COLLATE = utf8mb4_unicode_ci;

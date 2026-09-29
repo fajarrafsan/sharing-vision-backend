@@ -20,7 +20,9 @@ docker compose up -d --build
 ```
 
 Tunggu sekitar 20 detik, lalu buka `http://localhost:8080/docs`. Akun admin
-bawaan untuk mencoba: `admin@warta.local` / `admin12345`.
+bawaan untuk mencoba: `admin@warta.local` / `admin12345`. Nilai bawaan ini
+hanya untuk komputer sendiri; service mencatat peringatan di log saat
+memakainya. Untuk server sungguhan, lihat [Menjalankan di production](#menjalankan-di-production).
 
 Kalau mau jalan langsung dari kode dan hanya databasenya di container:
 
@@ -114,6 +116,9 @@ Semua di bawah `/api/v1`. Kolom Akses: `-` publik, `login` semua role,
 | GET | `/articles/{id}/comments` | - | komentar, dari yang terlama |
 | POST | `/articles/{id}/comments` | login | berkomentar |
 | PATCH | `/comments/{id}` | penulis komentar | ubah komentar |
+| POST | `/comments/{id}/report` | login | laporkan komentar |
+| GET | `/moderation/comments` | admin | antrean komentar yang dilaporkan atau disembunyikan |
+| POST | `/moderation/comments/{id}` | admin | `approve` atau `hide` |
 | DELETE | `/comments/{id}` | penulis komentar, admin | hapus komentar |
 | PUT, DELETE | `/articles/{id}/like` | login | suka, batal suka |
 | PUT, DELETE | `/articles/{id}/bookmark` | login | simpan, batal simpan |
@@ -241,6 +246,23 @@ walau artikel kemudian diarsipkan dan diterbitkan lagi.
 **Komentar** hanya bisa ditambahkan ke artikel yang sudah terbit. Admin bisa
 menghapus komentar siapa pun, tapi tidak mengubah kata-katanya.
 
+**Perlindungan spam komentar:**
+
+- Setiap akun paling banyak `COMMENT_RATE_LIMIT` komentar per menit (bawaan 5,
+  termasuk mengubah dan melaporkan komentar). Batasnya per akun, jadi tidak
+  bisa diakali dengan berganti IP.
+- Komentar paling banyak berisi 2 tautan dan tidak boleh seluruhnya huruf
+  kapital (422).
+- Komentar yang sama persis dari akun yang sama di artikel yang sama dalam 10
+  menit ditolak (409).
+- Pembaca bisa melaporkan komentar orang lain dengan alasan `spam`, `abusive`,
+  atau `other`, satu laporan per akun. Bila laporan dari akun berbeda mencapai
+  `COMMENT_HIDE_THRESHOLD` (bawaan 3), komentar disembunyikan otomatis: tidak
+  tampil dan tidak ikut dihitung di `comment_count` maupun statistik.
+- Admin meninjau antrean di `GET /moderation/comments`: `approve` menampilkan
+  kembali komentar dan menghapus laporannya, `hide` menyembunyikannya, dan
+  `DELETE /comments/{id}` menghapus permanen.
+
 **Kategori** yang masih dipakai artikel tidak bisa dihapus (409). Menghapus tag
 melepasnya dari semua artikel.
 
@@ -249,7 +271,15 @@ endpoint publik, supaya klien tahu harus refresh alih-alih diam-diam
 diperlakukan sebagai pengunjung anonim.
 
 **Register, login, dan refresh dibatasi** `AUTH_RATE_LIMIT` permintaan per
-menit per IP (bawaan 20). Kelebihannya dibalas 429 dengan header `Retry-After`.
+menit per IP (bawaan 20). Upload gambar dibatasi `UPLOAD_RATE_LIMIT` per menit
+per akun (bawaan 10). Kelebihannya dibalas 429 dengan header `Retry-After`.
+
+**IP pengunjung** dipakai untuk batas login dan hitungan dibaca. Bila service
+berada di balik reverse proxy (Nginx, load balancer), semua koneksi datang dari
+proxy itu. Daftarkan IP proxy di `TRUSTED_PROXIES`, maka IP asli dibaca dari
+`X-Forwarded-For`. Header itu hanya dipercaya dari proxy yang terdaftar, dan
+dibaca dari kanan sehingga entri palsu dari klien diabaikan. Tanpa
+`TRUSTED_PROXIES`, header itu diabaikan sama sekali.
 
 ## Bentuk response
 
@@ -305,7 +335,8 @@ dipindah ke tabel `categories`, status `publish`/`thrash` menjadi
 `published`/`archived`, setiap post diberi slug, dan waktu buat serta ubah yang
 asli dipertahankan. Post lama belum punya penulis, jadi semuanya diberikan ke
 akun `arsip@warta.local` yang tidak bisa dipakai login. Migrasi `000009` dan
-`000010` menambahkan sampul, hitungan dibaca, suka, dan bookmark.
+`000010` menambahkan sampul, hitungan dibaca, suka, dan bookmark; `000011`
+menambahkan laporan dan penyembunyian komentar.
 
 Untuk membuat skema manual tanpa migrate, ada `docs/schema.sql`.
 
@@ -351,6 +382,7 @@ migrations           berkas SQL migrasi (di-embed)
 internal/app         merangkai semua lapisan menjadi http.Handler
 internal/router      daftar rute dan middleware per rute
 internal/middleware  request id, log, recover, CORS, JWT, role, rate limit
+internal/clientip    IP pengunjung di balik reverse proxy
 internal/handler     handler HTTP
 internal/service     aturan bisnis: validasi, hak akses, slug, token
 internal/repository  query MySQL
@@ -382,6 +414,43 @@ salah sekaligus bila konfigurasinya tidak valid.
 `CORS_ORIGINS` bawaannya `*`. Untuk penggunaan sungguhan, isi dengan origin
 frontend saja, dipisahkan koma bila lebih dari satu.
 
+## Menjalankan di production
+
+Pakai `docker-compose.prod.yml` di atas `docker-compose.yml`. Override ini
+menyalakan `APP_ENV=production`, memakai user database sendiri (bukan root),
+dan menutup port MySQL dari luar server.
+
+1. Buat `.env` di server, jangan di-commit:
+
+   ```env
+   MYSQL_ROOT_PASSWORD=<acak>
+   DB_PASSWORD=<acak>
+   JWT_SECRET=<hasil: openssl rand -base64 48>
+   ADMIN_EMAIL=admin@domainmu.id
+   ADMIN_PASSWORD=<minimal 12 karakter>
+   CORS_ORIGINS=https://domain-frontend-mu.id
+   TRUSTED_PROXIES=<IP reverse proxy, bila ada>
+   ```
+
+2. Jalankan:
+
+   ```bash
+   docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build
+   ```
+
+Compose menolak jalan bila salah satu nilai wajib kosong. Service juga menolak
+menyala dalam mode production bila `JWT_SECRET` masih nilai contoh,
+`ADMIN_PASSWORD` kurang dari 12 karakter atau nilai contoh, `DB_PASSWORD`
+kosong atau nilai contoh, atau `CORS_ORIGINS` masih `*`.
+
+Image MySQL hanya membuat user dan password saat volume datanya masih kosong.
+Bila volume `warta_mysql_data` sudah pernah dipakai dengan pengaturan lama,
+buat user `warta` secara manual atau mulai dari volume baru.
+
+Yang tetap perlu disiapkan sendiri: HTTPS di reverse proxy, backup rutin
+database dan volume `warta_uploads`, serta alamat backend untuk
+`VITE_API_URL` di frontend.
+
 ## Catatan
 
 Endpoint versi awal (`/article/...`) sudah diganti seluruhnya oleh `/api/v1`.
@@ -395,7 +464,8 @@ access token habis (paling lama `ACCESS_TOKEN_TTL`). Karena itu umurnya dibuat
 pendek.
 
 Rate limit dan pencegah hitungan dibaca ganda disimpan di memori, jadi bila
-service dijalankan beberapa instance, keduanya berlaku per instance. Gambar
+service dijalankan beberapa instance, keduanya berlaku per instance; untuk itu
+dibutuhkan penyimpanan bersama seperti Redis. Gambar
 sampul disimpan di disk lokal; untuk beberapa instance, folder upload harus
 dibagi bersama (misalnya volume jaringan) atau diganti penyimpanan objek.
 
