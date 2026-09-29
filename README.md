@@ -387,8 +387,15 @@ menjalankan migrasi naik, turun, lalu naik lagi, kemudian menguji seluruh alur
 lewat HTTP. Ada juga test yang mengisi tabel `posts` versi awal lalu memastikan
 migrasi mengubahnya dengan benar. Test ini dilewati bila `TEST_DB_HOST` kosong.
 
+Bila `TEST_REDIS_URL` juga diisi, ikut berjalan test yang menyalakan dua
+instance sekaligus dengan Redis dan object storage bersama: upload lewat satu
+instance dibuka lewat instance lain, batas login dan hitungan dibaca dihitung
+bersama. Object storage di test memakai server S3 tiruan di memori, jadi tidak
+butuh layanan sungguhan.
+
 GitHub Actions (`.github/workflows/ci.yml`) menjalankan gofmt, `go vet`, semua
-test dengan MySQL, dan build image Docker.
+test dengan MySQL dan Redis, shellcheck untuk skrip backup, dan build image
+Docker.
 
 ### Postman
 
@@ -411,6 +418,7 @@ dalam semenit akan terkena rate limit.
 ```
 cmd/api              menyalakan service
 cmd/migrate          perintah migrasi
+scripts              backup dan restore database serta gambar
 api                  spesifikasi OpenAPI (di-embed)
 migrations           berkas SQL migrasi (di-embed)
 internal/app         merangkai semua lapisan menjadi http.Handler
@@ -426,7 +434,8 @@ internal/dto         bentuk request dan response
 internal/model       struct domain
 internal/pagination  membaca page dan per_page
 internal/slug        membuat slug
-internal/storage     menyimpan dan memeriksa gambar yang diunggah
+internal/storage     menyimpan dan memeriksa gambar: disk lokal atau S3
+internal/redisstore  rate limit dan hitungan dibaca bersama lewat Redis
 internal/mail        pengiriman email lewat SMTP dan templatnya
 internal/apperr      error yang membawa status HTTP
 internal/response    penulisan response JSON
@@ -438,7 +447,8 @@ internal/database    koneksi MySQL dan migrasi
 Alurnya handler ke service ke repository. Routing memakai `net/http` bawaan Go
 yang sudah bisa mencocokkan method dan membaca `{id}` dari URL, jadi tidak
 perlu pustaka router tambahan. Dependensi luar: driver MySQL, golang-migrate,
-godotenv, golang-jwt, dan `x/crypto` untuk bcrypt.
+godotenv, golang-jwt, `x/crypto` untuk bcrypt, go-redis, dan minio-go untuk
+object storage.
 
 ## Konfigurasi
 
@@ -456,7 +466,8 @@ untuk tautan di email, sitemap, dan RSS.
 
 Pakai `docker-compose.prod.yml` di atas `docker-compose.yml`. Override ini
 menyalakan `APP_ENV=production`, memakai user database sendiri (bukan root),
-dan menutup port MySQL dari luar server.
+menutup port MySQL dari luar server, menyertakan Redis, dan menjalankan
+backup otomatis.
 
 1. Buat `.env` di server, jangan di-commit:
 
@@ -497,9 +508,90 @@ Image MySQL hanya membuat user dan password saat volume datanya masih kosong.
 Bila volume `warta_mysql_data` sudah pernah dipakai dengan pengaturan lama,
 buat user `warta` secara manual atau mulai dari volume baru.
 
-Yang tetap perlu disiapkan sendiri: HTTPS di reverse proxy, backup rutin
-database dan volume `warta_uploads`, serta alamat backend untuk
+Yang tetap perlu disiapkan sendiri: HTTPS di reverse proxy, menyalin folder
+backup ke tempat lain (lihat di bawah), dan alamat backend untuk
 `VITE_API_URL` di frontend.
+
+### Backup
+
+Layanan `backup` menjalankan `scripts/backup.sh` setiap
+`BACKUP_INTERVAL_HOURS` jam (bawaan 24). Setiap backup adalah satu folder di
+`BACKUP_HOST_DIR` (bawaan `./backups` di server):
+
+```
+backups/warta-20260929T020000Z/
+  database.sql.gz   dump seluruh database, termasuk status migrasi
+  uploads.tar.gz    gambar di volume warta_uploads
+  SHA256SUMS        checksum keduanya
+```
+
+Dump memakai `--single-transaction`, jadi konsisten tanpa mengunci tabel dan
+service tetap melayani selama backup. Arsip diperiksa bisa dibaca sebelum
+dianggap berhasil, dan folder yang belum lengkap memakai akhiran `.partial`,
+jadi folder tanpa akhiran itu selalu utuh. Backup yang lebih tua dari
+`BACKUP_KEEP_DAYS` hari (bawaan 14) dihapus. Status kesehatan container
+`backup` menjadi unhealthy bila backup terakhir lebih tua dari dua kali
+interval.
+
+Backup di server yang sama tidak menolong bila servernya rusak. Salin folder
+itu ke tempat lain secara berkala, misalnya dengan cron dan
+[rclone](https://rclone.org) ke object storage:
+
+```bash
+rclone sync ./backups remote:warta-backups
+```
+
+Backup manual kapan saja:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.prod.yml run --rm backup once
+```
+
+Memulihkan (hentikan `api` dulu supaya tidak ada tulisan baru selama restore):
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.prod.yml stop api
+docker compose -f docker-compose.yml -f docker-compose.prod.yml run --rm \
+  -e RESTORE_CONFIRM=yes backup restore /backups/warta-20260929T020000Z
+docker compose -f docker-compose.yml -f docker-compose.prod.yml start api
+```
+
+Restore memeriksa checksum lebih dulu dan menolak berjalan tanpa
+`RESTORE_CONFIRM=yes`, karena isi database diganti seluruhnya. Gambar dari
+arsip ditambahkan ke volume `warta_uploads` tanpa menghapus yang sudah ada.
+
+Bila gambar disimpan di object storage (`UPLOAD_STORAGE=s3`), `uploads.tar.gz`
+tidak dibuat; nyalakan versioning atau replikasi di bucket-nya.
+
+### Beberapa instance
+
+Service tidak menyimpan sesi di memori (login memakai JWT), jadi bisa
+dijalankan beberapa instance di belakang load balancer. Yang perlu dibagi
+bersama:
+
+- **Rate limit dan hitungan dibaca**: isi `REDIS_URL`. Tanpa Redis, keduanya
+  disimpan di memori tiap instance, sehingga batas login per IP menjadi
+  berlipat sebanyak jumlah instance. `docker-compose.prod.yml` sudah
+  menyertakan Redis. Bila Redis sempat tidak terjangkau, permintaan tetap
+  dilayani tanpa batas sementara dan masalahnya dicatat di log, karena
+  menolak semua login lebih buruk.
+- **Gambar sampul**: di satu server, semua instance compose memakai volume
+  `warta_uploads` yang sama. Untuk instance di server berbeda, pakai
+  `UPLOAD_STORAGE=s3` dengan bucket di AWS S3, Cloudflare R2, MinIO, atau
+  layanan kompatibel lainnya. Path gambar di database tetap `/uploads/...`,
+  jadi berpindah dari local ke s3 cukup dengan menyalin isi folder ke bucket
+  (di bawah `S3_PREFIX`) lalu mengganti konfigurasi.
+
+`/health/ready` ikut memeriksa Redis dan object storage bila dipakai, supaya
+load balancer berhenti mengirim permintaan ke instance yang bermasalah.
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --scale api=3
+```
+
+Dengan beberapa instance, ubah port di `docker-compose.yml` menjadi rentang
+(`"8080-8082:8080"`) atau biarkan reverse proxy menjangkau container lewat
+jaringan compose.
 
 ## Catatan
 
@@ -512,12 +604,6 @@ Access token sengaja tidak dicek ke database di setiap permintaan supaya
 ringan. Akibatnya perubahan role atau penonaktifan akun baru terasa setelah
 access token habis (paling lama `ACCESS_TOKEN_TTL`). Karena itu umurnya dibuat
 pendek.
-
-Rate limit dan pencegah hitungan dibaca ganda disimpan di memori, jadi bila
-service dijalankan beberapa instance, keduanya berlaku per instance; untuk itu
-dibutuhkan penyimpanan bersama seperti Redis. Gambar
-sampul disimpan di disk lokal; untuk beberapa instance, folder upload harus
-dibagi bersama (misalnya volume jaringan) atau diganti penyimpanan objek.
 
 Gambar yang diunggah tapi tidak jadi dipakai artikel tidak dihapus otomatis.
 

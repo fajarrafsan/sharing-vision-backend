@@ -29,10 +29,10 @@ type Handlers struct {
 type Options struct {
 	Tokens      *auth.TokenManager
 	CORSOrigins []string
-	AuthLimiter *middleware.RateLimiter
+	AuthLimiter middleware.Limiter
 	// CommentLimiter dan UploadLimiter menghitung per akun.
-	CommentLimiter *middleware.RateLimiter
-	UploadLimiter  *middleware.RateLimiter
+	CommentLimiter middleware.Limiter
+	UploadLimiter  middleware.Limiter
 	ClientIP       *clientip.Resolver
 	MaxBodyBytes   int64
 	// MaxUploadBytes adalah batas body untuk upload gambar, sedikit di atas

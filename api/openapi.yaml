@@ -78,19 +78,22 @@ paths:
     get:
       operationId: healthReady
       tags: [Health]
-      summary: Service siap melayani (database terjangkau)
+      summary: Service siap melayani (semua ketergantungan terjangkau)
+      description: |
+        Selalu memeriksa database. Field `redis` dan `storage` hanya muncul
+        bila service memakai Redis (`REDIS_URL`) atau object storage
+        (`UPLOAD_STORAGE=s3`).
       responses:
         "200":
           description: Siap
           content:
             application/json:
-              schema:
-                type: object
-                properties:
-                  status: { type: string, example: ok }
-                  database: { type: string, example: terhubung }
+              schema: { $ref: "#/components/schemas/Readiness" }
         "503":
-          description: Database tidak terjangkau
+          description: Salah satu ketergantungan tidak terjangkau
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Readiness" }
 
   /sitemap.xml:
     get:
@@ -1146,6 +1149,13 @@ components:
           schema: { $ref: "#/components/schemas/ErrorResponse" }
 
   schemas:
+    Readiness:
+      type: object
+      properties:
+        status: { type: string, enum: [ok, unavailable] }
+        database: { type: string, example: terhubung }
+        redis: { type: string, example: terhubung }
+        storage: { type: string, example: terhubung }
     ErrorResponse:
       type: object
       properties:

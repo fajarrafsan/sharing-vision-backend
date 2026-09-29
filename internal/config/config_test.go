@@ -22,6 +22,7 @@ func valid() Config {
 		DBPassword:           "root",
 		AppURL:               "http://localhost:5173",
 		SMTPPort:             "587",
+		UploadStorage:        "local",
 	}
 }
 
@@ -83,5 +84,27 @@ func TestAppURLValidated(t *testing.T) {
 	c.AppURL = "warta.id"
 	if p := problems(c); !strings.Contains(p, "APP_URL") {
 		t.Fatalf("APP_URL tanpa skema seharusnya ditolak: %q", p)
+	}
+}
+
+func TestSharedStorageValidated(t *testing.T) {
+	c := valid()
+	c.UploadStorage = "s3"
+	c.S3Endpoint = "https://s3.example.com"
+	c.RedisURL = "localhost:6379"
+	p := problems(c)
+	for _, want := range []string{"S3_BUCKET", "S3_ACCESS_KEY", "S3_SECRET_KEY", "S3_ENDPOINT ditulis tanpa", "REDIS_URL"} {
+		if !strings.Contains(p, want) {
+			t.Errorf("%s seharusnya ditolak: %s", want, p)
+		}
+	}
+
+	c.S3Endpoint = "s3.example.com"
+	c.S3Bucket = "warta"
+	c.S3AccessKey = "kunci"
+	c.S3SecretKey = "rahasia"
+	c.RedisURL = "redis://redis:6379/0"
+	if p := problems(c); p != "" {
+		t.Fatalf("konfigurasi yang benar ditolak: %s", p)
 	}
 }

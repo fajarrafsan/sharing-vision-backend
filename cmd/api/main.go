@@ -60,6 +60,7 @@ func run() error {
 	if err != nil {
 		return errors.Join(errors.New("gagal menyiapkan service"), err)
 	}
+	defer a.Close()
 
 	if cfg.AdminEmail != "" {
 		if err := a.Auth.EnsureAdmin(ctx, cfg.AdminName, cfg.AdminEmail, cfg.AdminPassword); err != nil {

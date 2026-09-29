@@ -19,6 +19,15 @@ jobs:
           --health-interval=5s
           --health-timeout=5s
           --health-retries=20
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd="redis-cli ping"
+          --health-interval=5s
+          --health-timeout=5s
+          --health-retries=20
     steps:
       - uses: actions/checkout@v4
 
@@ -32,11 +41,12 @@ jobs:
       - name: Vet
         run: go vet ./...
 
-      - name: Test (termasuk integrasi MySQL)
+      - name: Test (termasuk integrasi MySQL dan Redis)
         run: go test -race -count=1 ./...
         env:
           TEST_DB_HOST: 127.0.0.1
           TEST_DB_PASSWORD: root
+          TEST_REDIS_URL: redis://127.0.0.1:6379/15
 
   docker:
     runs-on: ubuntu-latest
@@ -44,3 +54,10 @@ jobs:
       - uses: actions/checkout@v4
       - name: Build image
         run: docker build -t warta-api .
+
+  scripts:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Periksa skrip backup
+        run: shellcheck scripts/*.sh

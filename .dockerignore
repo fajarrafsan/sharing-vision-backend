@@ -9,3 +9,5 @@ Makefile
 docker-compose.yml
 .github
 uploads
+backups
+scripts

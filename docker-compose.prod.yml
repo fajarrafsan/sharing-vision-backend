@@ -19,7 +19,54 @@ services:
     healthcheck:
       test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
 
+  # Menyimpan rate limit dan pembaca yang sudah dihitung, bersama untuk semua
+  # instance api. Isinya boleh hilang (semua kunci punya masa berlaku), jadi
+  # tidak perlu disimpan ke disk.
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--save", "", "--appendonly", "no", "--maxmemory", "128mb", "--maxmemory-policy", "volatile-lru"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  # Backup database dan gambar setiap BACKUP_INTERVAL_HOURS jam ke folder
+  # BACKUP_HOST_DIR di server (bawaan ./backups), disimpan BACKUP_KEEP_DAYS
+  # hari. Lihat scripts/backup.sh dan bagian Backup di README.
+  backup:
+    image: mysql:8.0
+    restart: unless-stopped
+    depends_on:
+      mysql:
+        condition: service_healthy
+    # Perintah lain: once (backup sekarang), check, restore <folder>.
+    entrypoint: ["bash", "/scripts/backup.sh"]
+    command: ["loop"]
+    environment:
+      DB_HOST: mysql
+      DB_USER: warta
+      DB_PASSWORD: ${DB_PASSWORD:?isi DB_PASSWORD di .env}
+      DB_NAME: warta
+      UPLOAD_DIR: /uploads
+      BACKUP_DIR: /backups
+      BACKUP_INTERVAL_HOURS: ${BACKUP_INTERVAL_HOURS:-24}
+      BACKUP_KEEP_DAYS: ${BACKUP_KEEP_DAYS:-14}
+    volumes:
+      - ./scripts:/scripts:ro
+      # Baca-tulis supaya restore.sh bisa mengembalikan gambar.
+      - warta_uploads:/uploads
+      - ${BACKUP_HOST_DIR:-./backups}:/backups
+    healthcheck:
+      test: ["CMD", "bash", "/scripts/backup.sh", "check"]
+      interval: 1h
+      start_period: 10m
+
   api:
+    depends_on:
+      redis:
+        condition: service_healthy
     environment:
       APP_ENV: production
       DB_USER: warta
@@ -33,3 +80,4 @@ services:
       MAIL_FROM: ${MAIL_FROM:?isi MAIL_FROM, misalnya Warta <noreply@domainmu.id>}
       # IP reverse proxy di depan service, misalnya Nginx atau load balancer.
       TRUSTED_PROXIES: ${TRUSTED_PROXIES:-}
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}

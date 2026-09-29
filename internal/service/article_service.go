@@ -40,7 +40,7 @@ type ArticleService interface {
 
 // CoverChecker memastikan gambar sampul memang sudah diunggah.
 type CoverChecker interface {
-	Exists(url string) bool
+	Exists(ctx context.Context, url string) bool
 }
 
 type articleService struct {
@@ -48,7 +48,7 @@ type articleService struct {
 	categories repository.CategoryRepository
 	engagement repository.EngagementRepository
 	covers     CoverChecker
-	views      *viewDeduper
+	views      ViewDeduper
 	now        func() time.Time
 }
 
@@ -57,13 +57,18 @@ func NewArticleService(
 	categories repository.CategoryRepository,
 	engagement repository.EngagementRepository,
 	covers CoverChecker,
+	views ViewDeduper,
 ) ArticleService {
+	// Tanpa penyimpanan bersama, pembaca diingat di memori instance ini.
+	if views == nil {
+		views = newViewDeduper(ViewWindow)
+	}
 	return &articleService{
 		articles:   articles,
 		categories: categories,
 		engagement: engagement,
 		covers:     covers,
-		views:      newViewDeduper(30 * time.Minute),
+		views:      views,
 		now:        time.Now,
 	}
 }
@@ -291,7 +296,7 @@ func (s *articleService) validate(ctx context.Context, req dto.ArticleRequest, k
 	if problems := validation.ValidateArticle(req); len(problems) > 0 {
 		return apperr.Validation(problems)
 	}
-	if req.CoverImage != "" && req.CoverImage != knownCover && !s.covers.Exists(req.CoverImage) {
+	if req.CoverImage != "" && req.CoverImage != knownCover && !s.covers.Exists(ctx, req.CoverImage) {
 		return apperr.Validation(map[string]string{"cover_image": "gambar sampul tidak ditemukan, unggah ulang"})
 	}
 	if req.CategoryID == knownCategory {
@@ -380,7 +385,7 @@ func (s *articleService) RecordView(ctx context.Context, actor auth.Actor, id in
 		return err
 	}
 	// Penulis yang membuka artikelnya sendiri tidak dihitung.
-	if actor.ID == article.AuthorID || !s.views.first(viewer, id, s.now()) {
+	if actor.ID == article.AuthorID || !s.views.First(ctx, viewer, id) {
 		return nil
 	}
 

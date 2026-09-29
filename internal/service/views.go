@@ -1,24 +1,38 @@
 package service
 
 import (
+	"context"
 	"strconv"
 	"sync"
 	"time"
 )
 
-// viewDeduper mengingat pasangan pembaca dan artikel selama window, supaya
-// satu pembaca yang memuat ulang halaman hanya dihitung sekali. Disimpan di
-// memori, jadi bila service dijalankan beberapa instance, dedupe berlaku per
-// instance.
+// ViewDeduper menjawab apakah pembaca baru pertama kali membaca artikel itu
+// dalam rentang waktu tertentu, supaya memuat ulang halaman hanya dihitung
+// sekali.
+type ViewDeduper interface {
+	First(ctx context.Context, viewer string, articleID int64) bool
+}
+
+// viewDeduper menyimpan ingatan itu di memori. Cukup untuk satu instance;
+// untuk beberapa instance pakai redisstore.Deduper.
 type viewDeduper struct {
 	mu        sync.Mutex
 	window    time.Duration
 	seen      map[string]time.Time
 	lastSweep time.Time
+	now       func() time.Time
 }
 
+// ViewWindow adalah rentang waktu satu pembaca dihitung sekali per artikel.
+const ViewWindow = 30 * time.Minute
+
 func newViewDeduper(window time.Duration) *viewDeduper {
-	return &viewDeduper{window: window, seen: make(map[string]time.Time)}
+	return &viewDeduper{window: window, seen: make(map[string]time.Time), now: time.Now}
+}
+
+func (d *viewDeduper) First(_ context.Context, viewer string, articleID int64) bool {
+	return d.first(viewer, articleID, d.now())
 }
 
 // first mengembalikan true bila pembaca belum membaca artikel ini dalam window.

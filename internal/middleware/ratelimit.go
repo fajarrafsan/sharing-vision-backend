@@ -1,6 +1,7 @@
 package middleware
 
 import (
+	"context"
 	"math"
 	"net/http"
 	"strconv"
@@ -13,9 +14,15 @@ import (
 	"warta/internal/response"
 )
 
-// RateLimiter adalah token bucket per kunci (alamat IP) yang disimpan di
-// memori. Cukup untuk satu instance; bila service dijalankan beberapa
-// instance, batasnya berlaku per instance.
+// Limiter memutuskan apakah permintaan dengan kunci tertentu boleh lewat.
+// retryAfter adalah waktu tunggu bila ditolak.
+type Limiter interface {
+	Allow(ctx context.Context, key string) (ok bool, retryAfter time.Duration)
+}
+
+// RateLimiter adalah token bucket per kunci yang disimpan di memori. Cukup
+// untuk satu instance; untuk beberapa instance pakai redisstore.Limiter
+// supaya batasnya dihitung bersama.
 type RateLimiter struct {
 	mu        sync.Mutex
 	rate      float64 // token per detik
@@ -43,7 +50,7 @@ func NewRateLimiter(perMinute int) *RateLimiter {
 
 // Allow mengambil satu token. Bila habis, retryAfter adalah waktu tunggu
 // sampai token berikutnya tersedia.
-func (l *RateLimiter) Allow(key string) (ok bool, retryAfter time.Duration) {
+func (l *RateLimiter) Allow(_ context.Context, key string) (ok bool, retryAfter time.Duration) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
@@ -85,7 +92,7 @@ func (l *RateLimiter) sweep(now time.Time) {
 }
 
 // RateLimit membatasi per IP pengunjung (lihat clientip).
-func RateLimit(l *RateLimiter) Middleware {
+func RateLimit(l Limiter) Middleware {
 	return rateLimit(l, "terlalu banyak percobaan, coba lagi sebentar lagi", func(r *http.Request) string {
 		return "ip:" + clientip.From(r)
 	})
@@ -93,16 +100,16 @@ func RateLimit(l *RateLimiter) Middleware {
 
 // RateLimitPerUser membatasi per akun, supaya satu akun tidak bisa membanjiri
 // dengan berganti IP. Dipasang setelah RequireAuth.
-func RateLimitPerUser(l *RateLimiter, message string) Middleware {
+func RateLimitPerUser(l Limiter, message string) Middleware {
 	return rateLimit(l, message, func(r *http.Request) string {
 		return "user:" + strconv.FormatInt(auth.ActorFrom(r.Context()).ID, 10)
 	})
 }
 
-func rateLimit(l *RateLimiter, message string, key func(*http.Request) string) Middleware {
+func rateLimit(l Limiter, message string, key func(*http.Request) string) Middleware {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			ok, retryAfter := l.Allow(key(r))
+			ok, retryAfter := l.Allow(r.Context(), key(r))
 			if !ok {
 				seconds := int(math.Ceil(retryAfter.Seconds()))
 				w.Header().Set("Retry-After", strconv.Itoa(max(seconds, 1)))

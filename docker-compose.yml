@@ -19,8 +19,9 @@ services:
   # container_name sengaja tidak dipakai di sini supaya service ini bisa
   # dijalankan beberapa instance sekaligus:
   #   docker compose up -d --scale api=3
-  # Semua instance memakai JWT_SECRET yang sama, jadi token dari satu instance
-  # berlaku di instance lain. Rate limit dihitung per instance.
+  # Semua instance memakai JWT_SECRET, database, dan volume gambar yang sama.
+  # Isi REDIS_URL supaya rate limit dan hitungan dibaca juga dihitung bersama
+  # (docker-compose.prod.yml sudah menyertakan Redis).
   api:
     build: .
     restart: unless-stopped
@@ -53,6 +54,16 @@ services:
       SMTP_PASSWORD: ${SMTP_PASSWORD:-}
       MAIL_FROM: ${MAIL_FROM:-Warta <noreply@warta.local>}
       REQUIRE_EMAIL_VERIFICATION: ${REQUIRE_EMAIL_VERIFICATION:-}
+      REDIS_URL: ${REDIS_URL:-}
+      # local menyimpan gambar di volume warta_uploads; s3 di object storage.
+      UPLOAD_STORAGE: ${UPLOAD_STORAGE:-local}
+      S3_ENDPOINT: ${S3_ENDPOINT:-}
+      S3_REGION: ${S3_REGION:-}
+      S3_BUCKET: ${S3_BUCKET:-}
+      S3_ACCESS_KEY: ${S3_ACCESS_KEY:-}
+      S3_SECRET_KEY: ${S3_SECRET_KEY:-}
+      S3_USE_SSL: ${S3_USE_SSL:-true}
+      S3_PREFIX: ${S3_PREFIX:-uploads/}
     volumes:
       - warta_uploads:/app/uploads
     # Untuk menjalankan beberapa instance sekaligus (docker compose up -d --scale api=3),

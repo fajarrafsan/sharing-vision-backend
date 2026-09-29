@@ -66,9 +66,22 @@ type Config struct {
 	// membuat komentar disembunyikan otomatis sampai ditinjau admin.
 	CommentHideThreshold int
 
+	// UploadStorage adalah local (folder UploadDir) atau s3.
+	UploadStorage string
 	// UploadDir adalah folder gambar sampul yang diunggah.
 	UploadDir      string
 	MaxUploadBytes int64
+	S3Endpoint     string
+	S3Region       string
+	S3Bucket       string
+	S3AccessKey    string
+	S3SecretKey    string
+	S3UseSSL       bool
+	S3Prefix       string
+
+	// RedisURL kosong berarti rate limit dan hitungan dibaca disimpan di
+	// memori tiap instance. Isi bila service dijalankan beberapa instance.
+	RedisURL string
 
 	AdminName     string
 	AdminEmail    string
@@ -122,8 +135,18 @@ func Load() (Config, error) {
 		UploadRateLimit:      l.integer("UPLOAD_RATE_LIMIT", 10),
 		CommentHideThreshold: l.integer("COMMENT_HIDE_THRESHOLD", 3),
 
+		UploadStorage:  l.oneOf("UPLOAD_STORAGE", "local", "local", "s3"),
 		UploadDir:      l.str("UPLOAD_DIR", "uploads"),
 		MaxUploadBytes: int64(l.integer("MAX_UPLOAD_MB", 2)) << 20,
+		S3Endpoint:     l.str("S3_ENDPOINT", ""),
+		S3Region:       l.str("S3_REGION", ""),
+		S3Bucket:       l.str("S3_BUCKET", ""),
+		S3AccessKey:    l.str("S3_ACCESS_KEY", ""),
+		S3SecretKey:    l.str("S3_SECRET_KEY", ""),
+		S3UseSSL:       l.boolean("S3_USE_SSL", true),
+		S3Prefix:       l.str("S3_PREFIX", "uploads/"),
+
+		RedisURL: l.str("REDIS_URL", ""),
 
 		AdminName:     l.str("ADMIN_NAME", "Administrator"),
 		AdminEmail:    strings.ToLower(l.str("ADMIN_EMAIL", "")),
@@ -184,6 +207,22 @@ func (c Config) validate(l *loader) {
 		if (c.SMTPUsername == "") != (c.SMTPPassword == "") {
 			l.fail("SMTP_USERNAME dan SMTP_PASSWORD harus diisi berdua atau dikosongkan berdua")
 		}
+	}
+	if c.UploadStorage == "s3" {
+		for key, value := range map[string]string{
+			"S3_ENDPOINT": c.S3Endpoint, "S3_BUCKET": c.S3Bucket,
+			"S3_ACCESS_KEY": c.S3AccessKey, "S3_SECRET_KEY": c.S3SecretKey,
+		} {
+			if value == "" {
+				l.fail("%s wajib diisi bila UPLOAD_STORAGE=s3", key)
+			}
+		}
+		if strings.Contains(c.S3Endpoint, "://") {
+			l.fail("S3_ENDPOINT ditulis tanpa http:// atau https://; atur TLS dengan S3_USE_SSL")
+		}
+	}
+	if c.RedisURL != "" && !strings.HasPrefix(c.RedisURL, "redis://") && !strings.HasPrefix(c.RedisURL, "rediss://") {
+		l.fail("REDIS_URL harus diawali redis:// atau rediss://")
 	}
 	if (c.AdminEmail == "") != (c.AdminPassword == "") {
 		l.fail("ADMIN_EMAIL dan ADMIN_PASSWORD harus diisi berdua atau dikosongkan berdua")

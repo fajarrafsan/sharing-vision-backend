@@ -97,10 +97,10 @@ func (h *StatsHandler) Overview(w http.ResponseWriter, r *http.Request) {
 
 // UploadHandler menerima dan menyajikan gambar sampul.
 type UploadHandler struct {
-	store *storage.Local
+	store storage.Store
 }
 
-func NewUploadHandler(store *storage.Local) *UploadHandler {
+func NewUploadHandler(store storage.Store) *UploadHandler {
 	return &UploadHandler{store: store}
 }
 
@@ -118,7 +118,7 @@ func (h *UploadHandler) Create(w http.ResponseWriter, r *http.Request) {
 	}
 	defer file.Close()
 
-	url, err := h.store.SaveImage(file)
+	url, err := h.store.SaveImage(r.Context(), file)
 	switch {
 	case errors.Is(err, storage.ErrTooLarge):
 		response.Error(w, r, apperr.PayloadTooLarge("gambar melebihi batas ukuran"))
@@ -136,14 +136,21 @@ func (h *UploadHandler) Create(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *UploadHandler) Serve(w http.ResponseWriter, r *http.Request) {
-	path, ok := h.store.Path(r.PathValue("name"))
-	if !ok {
+	name := r.PathValue("name")
+	obj, err := h.store.Open(r.Context(), name)
+	if errors.Is(err, storage.ErrNotFound) {
 		response.Error(w, r, apperr.NotFound("berkas tidak ditemukan"))
 		return
 	}
+	if err != nil {
+		response.Error(w, r, apperr.Internal(err))
+		return
+	}
+	defer obj.Close()
 
 	// Nama berkas acak dan tidak pernah ditimpa, jadi aman di-cache lama.
+	w.Header().Set("Content-Type", storage.ContentType(name))
 	w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
 	w.Header().Set("Content-Security-Policy", "default-src 'none'")
-	http.ServeFile(w, r, path)
+	http.ServeContent(w, r, name, obj.ModTime, obj)
 }

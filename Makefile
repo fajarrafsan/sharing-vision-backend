@@ -39,8 +39,10 @@ test:
 	go test ./...
 
 # Semua test, termasuk end-to-end terhadap MySQL (make db-up lebih dulu).
+# Test Redis ikut berjalan bila TEST_REDIS_URL diisi, misalnya
+#   make test-integration TEST_REDIS_URL=redis://127.0.0.1:6379/15
 test-integration:
-	TEST_DB_HOST=$(TEST_DB_HOST) TEST_DB_PASSWORD=$(TEST_DB_PASSWORD) go test -race -count=1 ./...
+	TEST_DB_HOST=$(TEST_DB_HOST) TEST_DB_PASSWORD=$(TEST_DB_PASSWORD) TEST_REDIS_URL=$(TEST_REDIS_URL) go test -race -count=1 ./...
 
 check: fmt-check vet test
 

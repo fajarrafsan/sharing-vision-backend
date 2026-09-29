@@ -3,9 +3,12 @@ package app
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"time"
+
+	"github.com/redis/go-redis/v9"
 
 	"warta/internal/auth"
 	"warta/internal/clientip"
@@ -14,6 +17,7 @@ import (
 	"warta/internal/mail"
 	"warta/internal/middleware"
 	"warta/internal/pagination"
+	"warta/internal/redisstore"
 	"warta/internal/repository"
 	"warta/internal/router"
 	"warta/internal/service"
@@ -30,6 +34,36 @@ type App struct {
 
 	refreshTokens repository.RefreshTokenRepository
 	userTokens    repository.UserTokenRepository
+	redis         *redis.Client
+}
+
+// Close menutup koneksi yang dibuka New selain database.
+func (a *App) Close() error {
+	if a.redis != nil {
+		return a.redis.Close()
+	}
+	return nil
+}
+
+// newStore memilih tempat gambar sampul dari konfigurasi.
+func newStore(ctx context.Context, cfg config.Config) (storage.Store, handler.Check, error) {
+	if cfg.UploadStorage != "s3" {
+		store, err := storage.NewLocal(cfg.UploadDir, cfg.MaxUploadBytes)
+		return store, nil, err
+	}
+	store, err := storage.NewS3(ctx, storage.S3Config{
+		Endpoint:  cfg.S3Endpoint,
+		Region:    cfg.S3Region,
+		Bucket:    cfg.S3Bucket,
+		AccessKey: cfg.S3AccessKey,
+		SecretKey: cfg.S3SecretKey,
+		UseSSL:    cfg.S3UseSSL,
+		Prefix:    cfg.S3Prefix,
+	}, cfg.MaxUploadBytes)
+	if err != nil {
+		return nil, nil, fmt.Errorf("object storage: %w", err)
+	}
+	return store, store.Ping, nil
 }
 
 // NewMailer memilih pengirim email dari konfigurasi: SMTP bila diatur, atau
@@ -51,12 +85,45 @@ func NewMailer(cfg config.Config) mail.Mailer {
 }
 
 func New(cfg config.Config, db *sql.DB, hasher auth.PasswordHasher, mailer mail.Mailer) (*App, error) {
-	uploads, err := storage.NewLocal(cfg.UploadDir, cfg.MaxUploadBytes)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	checks := map[string]handler.Check{}
+	uploads, storageCheck, err := newStore(ctx, cfg)
 	if err != nil {
 		return nil, err
 	}
+	if storageCheck != nil {
+		checks["storage"] = storageCheck
+	}
+
+	// Tanpa Redis, rate limit dan pembaca yang sudah dihitung disimpan di
+	// memori instance ini. Dengan Redis, semua instance berbagi hitungan.
+	var (
+		redisClient                                *redis.Client
+		authLimiter, commentLimiter, uploadLimiter middleware.Limiter
+		views                                      service.ViewDeduper
+	)
+	if cfg.RedisURL != "" {
+		redisClient, err = redisstore.Connect(ctx, cfg.RedisURL)
+		if err != nil {
+			return nil, fmt.Errorf("redis: %w", err)
+		}
+		checks["redis"] = func(ctx context.Context) error { return redisClient.Ping(ctx).Err() }
+		authLimiter = redisstore.NewLimiter(redisClient, "auth", cfg.AuthRateLimit)
+		commentLimiter = redisstore.NewLimiter(redisClient, "comment", cfg.CommentRateLimit)
+		uploadLimiter = redisstore.NewLimiter(redisClient, "upload", cfg.UploadRateLimit)
+		views = redisstore.NewDeduper(redisClient, service.ViewWindow)
+	} else {
+		authLimiter = middleware.NewRateLimiter(cfg.AuthRateLimit)
+		commentLimiter = middleware.NewRateLimiter(cfg.CommentRateLimit)
+		uploadLimiter = middleware.NewRateLimiter(cfg.UploadRateLimit)
+	}
 	resolver, err := clientip.NewResolver(cfg.TrustedProxies)
 	if err != nil {
+		if redisClient != nil {
+			redisClient.Close()
+		}
 		return nil, err
 	}
 
@@ -85,13 +152,13 @@ func New(cfg config.Config, db *sql.DB, hasher auth.PasswordHasher, mailer mail.
 	})
 
 	handlers := router.Handlers{
-		Health:     handler.NewHealthHandler(db),
+		Health:     handler.NewHealthHandler(db, checks),
 		Docs:       handler.NewDocsHandler(),
 		Auth:       handler.NewAuthHandler(authService),
 		Users:      handler.NewUserHandler(service.NewUserService(users), pages),
 		Categories: handler.NewCategoryHandler(service.NewCategoryService(categories)),
 		Tags:       handler.NewTagHandler(service.NewTagService(tags), pages),
-		Articles:   handler.NewArticleHandler(service.NewArticleService(articles, categories, engagement, uploads), pages),
+		Articles:   handler.NewArticleHandler(service.NewArticleService(articles, categories, engagement, uploads, views), pages),
 		Comments:   handler.NewCommentHandler(commentService, pages),
 		Stats:      handler.NewStatsHandler(service.NewStatsService(repository.NewStatsRepository(db))),
 		Uploads:    handler.NewUploadHandler(uploads),
@@ -102,9 +169,9 @@ func New(cfg config.Config, db *sql.DB, hasher auth.PasswordHasher, mailer mail.
 		Handler: router.New(handlers, router.Options{
 			Tokens:         tokens,
 			CORSOrigins:    cfg.CORSOrigins,
-			AuthLimiter:    middleware.NewRateLimiter(cfg.AuthRateLimit),
-			CommentLimiter: middleware.NewRateLimiter(cfg.CommentRateLimit),
-			UploadLimiter:  middleware.NewRateLimiter(cfg.UploadRateLimit),
+			AuthLimiter:    authLimiter,
+			CommentLimiter: commentLimiter,
+			UploadLimiter:  uploadLimiter,
 			ClientIP:       resolver,
 			MaxBodyBytes:   maxBodyBytes,
 			MaxUploadBytes: cfg.MaxUploadBytes + 64<<10,
@@ -112,6 +179,7 @@ func New(cfg config.Config, db *sql.DB, hasher auth.PasswordHasher, mailer mail.
 		Auth:          authService,
 		refreshTokens: refreshTokens,
 		userTokens:    userTokens,
+		redis:         redisClient,
 	}, nil
 }
 

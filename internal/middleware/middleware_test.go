@@ -1,6 +1,7 @@
 package middleware
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -14,28 +15,29 @@ func TestRateLimiter(t *testing.T) {
 	now := time.Unix(0, 0)
 	l := NewRateLimiter(3)
 	l.now = func() time.Time { return now }
+	ctx := context.Background()
 
 	for i := 0; i < 3; i++ {
-		if ok, _ := l.Allow("a"); !ok {
+		if ok, _ := l.Allow(ctx, "a"); !ok {
 			t.Fatalf("permintaan ke-%d seharusnya lolos", i+1)
 		}
 	}
 
-	ok, wait := l.Allow("a")
+	ok, wait := l.Allow(ctx, "a")
 	if ok || wait != 20*time.Second {
 		t.Fatalf("seharusnya ditolak dengan jeda 20 detik: %v %v", ok, wait)
 	}
-	if ok, _ := l.Allow("b"); !ok {
+	if ok, _ := l.Allow(ctx, "b"); !ok {
 		t.Fatal("kunci lain punya jatah sendiri")
 	}
 
 	now = now.Add(20 * time.Second)
-	if ok, _ := l.Allow("a"); !ok {
+	if ok, _ := l.Allow(ctx, "a"); !ok {
 		t.Fatal("token seharusnya terisi lagi")
 	}
 
 	now = now.Add(2 * time.Minute)
-	l.Allow("c")
+	l.Allow(ctx, "c")
 	if _, found := l.buckets["a"]; found {
 		t.Fatal("bucket yang sudah penuh seharusnya dibuang")
 	}
