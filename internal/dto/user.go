@@ -52,6 +52,23 @@ type ChangePasswordRequest struct {
 	NewPassword     string `json:"new_password"`
 }
 
+type ForgotPasswordRequest struct {
+	Email string `json:"email"`
+}
+
+func (r *ForgotPasswordRequest) Normalize() {
+	r.Email = strings.ToLower(strings.TrimSpace(r.Email))
+}
+
+type ResetPasswordRequest struct {
+	Token       string `json:"token"`
+	NewPassword string `json:"new_password"`
+}
+
+type VerifyEmailRequest struct {
+	Token string `json:"token"`
+}
+
 type UpdateRoleRequest struct {
 	Role string `json:"role"`
 }
@@ -67,22 +84,26 @@ type UserQuery struct {
 
 // UserResponse berisi email, jadi hanya untuk pemilik akun dan admin.
 type UserResponse struct {
-	ID        int64     `json:"id"`
-	Name      string    `json:"name"`
-	Email     string    `json:"email"`
-	Role      string    `json:"role"`
-	CreatedAt time.Time `json:"created_at"`
-	UpdatedAt time.Time `json:"updated_at"`
+	ID    int64  `json:"id"`
+	Name  string `json:"name"`
+	Email string `json:"email"`
+	Role  string `json:"role"`
+	// EmailVerified false berarti akun belum bisa berkomentar bila
+	// verifikasi email diwajibkan.
+	EmailVerified bool      `json:"email_verified"`
+	CreatedAt     time.Time `json:"created_at"`
+	UpdatedAt     time.Time `json:"updated_at"`
 }
 
 func NewUserResponse(u model.User) UserResponse {
 	return UserResponse{
-		ID:        u.ID,
-		Name:      u.Name,
-		Email:     u.Email,
-		Role:      string(u.Role),
-		CreatedAt: u.CreatedAt,
-		UpdatedAt: u.UpdatedAt,
+		ID:            u.ID,
+		Name:          u.Name,
+		Email:         u.Email,
+		Role:          string(u.Role),
+		EmailVerified: u.EmailVerifiedAt != nil,
+		CreatedAt:     u.CreatedAt,
+		UpdatedAt:     u.UpdatedAt,
 	}
 }
 

@@ -12,8 +12,11 @@ import (
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
+	"regexp"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -23,6 +26,7 @@ import (
 	"warta/internal/auth"
 	"warta/internal/config"
 	"warta/internal/database"
+	"warta/internal/mail"
 )
 
 // Test di file ini butuh MySQL sungguhan dan dilewati bila TEST_DB_HOST
@@ -54,6 +58,7 @@ func testConfig(t *testing.T) config.Config {
 		CommentHideThreshold: 2,
 		UploadDir:            t.TempDir(),
 		MaxUploadBytes:       1 << 20,
+		AppURL:               "https://warta.test",
 		DBHost:               host,
 		DBPort:               envOr("TEST_DB_PORT", "3306"),
 		DBUser:               envOr("TEST_DB_USER", "root"),
@@ -100,7 +105,7 @@ func migrate(t *testing.T, cfg config.Config, target uint) {
 	}
 }
 
-const latestVersion = 11
+const latestVersion = 12
 
 type client struct {
 	t    *testing.T
@@ -254,9 +259,57 @@ type tokens struct {
 }
 
 type user struct {
-	ID   int64  `json:"id"`
-	Name string `json:"name"`
-	Role string `json:"role"`
+	ID            int64  `json:"id"`
+	Name          string `json:"name"`
+	Role          string `json:"role"`
+	EmailVerified bool   `json:"email_verified"`
+}
+
+// outbox menampung email yang "terkirim" selama test.
+type outbox struct {
+	mu   sync.Mutex
+	sent []mail.Message
+}
+
+func (o *outbox) Send(_ context.Context, m mail.Message) error {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.sent = append(o.sent, m)
+	return nil
+}
+
+var tokenInLink = regexp.MustCompile(`https://warta\.test(/[a-z-]+)\?token=(\S+)`)
+
+// lastLink mengembalikan path dan token dari tautan di email terakhir ke to.
+func (o *outbox) lastLink(t *testing.T, to string) (path, token string) {
+	t.Helper()
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	for i := len(o.sent) - 1; i >= 0; i-- {
+		if o.sent[i].To != to {
+			continue
+		}
+		m := tokenInLink.FindStringSubmatch(o.sent[i].Text)
+		if m == nil {
+			t.Fatalf("email tanpa tautan: %s", o.sent[i].Text)
+		}
+		token, _ = url.QueryUnescape(m[2])
+		return m[1], token
+	}
+	t.Fatalf("tidak ada email untuk %s", to)
+	return "", ""
+}
+
+func (o *outbox) count(to string) int {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	n := 0
+	for _, m := range o.sent {
+		if m.To == to {
+			n++
+		}
+	}
+	return n
 }
 
 type category struct {
@@ -341,7 +394,7 @@ func TestAPI(t *testing.T) {
 	migrate(t, cfg, latestVersion)
 
 	db := connect(t, cfg)
-	a, err := app.New(cfg, db, auth.BcryptHasher{Cost: bcrypt.MinCost})
+	a, err := app.New(cfg, db, auth.BcryptHasher{Cost: bcrypt.MinCost}, &outbox{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -883,7 +936,7 @@ func TestAPI(t *testing.T) {
 		limited.CommentRateLimit = 2
 		limited.AuthRateLimit = 2
 		limited.TrustedProxies = []string{"127.0.0.1", "::1"}
-		a2, err := app.New(limited, db, auth.BcryptHasher{Cost: bcrypt.MinCost})
+		a2, err := app.New(limited, db, auth.BcryptHasher{Cost: bcrypt.MinCost}, &outbox{})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -921,6 +974,143 @@ func TestAPI(t *testing.T) {
 		c.do("GET", fmt.Sprintf("/api/v1/articles/%d", published.ID), "", nil).expect(http.StatusOK, &after)
 		if after.ViewCount != before.ViewCount+2 {
 			t.Fatalf("view_count %d -> %d, ingin +2", before.ViewCount, after.ViewCount)
+		}
+	})
+
+	t.Run("verifikasi email dan lupa password", func(t *testing.T) {
+		strict := cfg
+		strict.RequireEmailVerification = true
+		box := &outbox{}
+		a3, err := app.New(strict, db, auth.BcryptHasher{Cost: bcrypt.MinCost}, box)
+		if err != nil {
+			t.Fatal(err)
+		}
+		srv := httptest.NewServer(a3.Handler)
+		defer srv.Close()
+		c := client{t: t, base: srv.URL}
+
+		var baru tokens
+		c.do("POST", "/api/v1/auth/register", "", map[string]string{
+			"name": "Akun Baru", "email": "baru@warta.test", "password": "rahasia123",
+		}).expect(http.StatusCreated, &baru)
+		if baru.User.EmailVerified {
+			t.Fatal("akun baru belum terverifikasi")
+		}
+		path, verifyToken := box.lastLink(t, "baru@warta.test")
+		if path != "/verify-email" {
+			t.Fatalf("tautan verifikasi: %s", path)
+		}
+
+		// Belum terverifikasi: tidak bisa berkomentar atau melapor.
+		comments := fmt.Sprintf("/api/v1/articles/%d/comments", published.ID)
+		c.do("POST", comments, baru.AccessToken, map[string]string{"body": "Halo semuanya"}).
+			expectError(http.StatusForbidden, "email_not_verified")
+		var target comment
+		c.do("POST", comments, admin.AccessToken, map[string]string{"body": "Komentar admin untuk dilaporkan"}).
+			expect(http.StatusCreated, &target)
+		c.do("POST", fmt.Sprintf("/api/v1/comments/%d/report", target.ID), baru.AccessToken, map[string]string{"reason": "spam"}).
+			expectError(http.StatusForbidden, "email_not_verified")
+
+		c.do("POST", "/api/v1/auth/resend-verification", "", nil).expectError(http.StatusUnauthorized, "unauthorized")
+		c.do("POST", "/api/v1/auth/resend-verification", baru.AccessToken, nil).
+			expectError(http.StatusTooManyRequests, "too_many_requests")
+
+		c.do("POST", "/api/v1/auth/verify-email", "", map[string]string{"token": "palsu"}).
+			expectError(http.StatusUnprocessableEntity, "validation_failed")
+		var verified user
+		c.do("POST", "/api/v1/auth/verify-email", "", map[string]string{"token": verifyToken}).expect(http.StatusOK, &verified)
+		if !verified.EmailVerified || verified.ID != baru.User.ID {
+			t.Fatalf("hasil verifikasi: %+v", verified)
+		}
+		c.do("POST", "/api/v1/auth/verify-email", "", map[string]string{"token": verifyToken}).
+			expectError(http.StatusUnprocessableEntity, "validation_failed")
+		c.do("POST", "/api/v1/auth/resend-verification", baru.AccessToken, nil).expectError(http.StatusConflict, "conflict")
+
+		// Langsung berlaku tanpa perlu token baru.
+		c.do("POST", comments, baru.AccessToken, map[string]string{"body": "Halo semuanya"}).expect(http.StatusCreated, nil)
+		var me user
+		c.do("GET", "/api/v1/me", baru.AccessToken, nil).expect(http.StatusOK, &me)
+		if !me.EmailVerified {
+			t.Fatal("/me seharusnya terverifikasi")
+		}
+
+		// Lupa password: jawaban sama untuk email terdaftar dan tidak.
+		c.do("POST", "/api/v1/auth/forgot-password", "", map[string]string{"email": "tidak-ada@warta.test"}).
+			expect(http.StatusNoContent, nil)
+		c.do("POST", "/api/v1/auth/forgot-password", "", map[string]string{"email": "bukan-email"}).
+			expectError(http.StatusUnprocessableEntity, "validation_failed")
+		if box.count("tidak-ada@warta.test") != 0 {
+			t.Fatal("email tidak terdaftar tidak boleh dikirimi")
+		}
+		c.do("POST", "/api/v1/auth/forgot-password", "", map[string]string{"email": "Baru@Warta.test"}).
+			expect(http.StatusNoContent, nil)
+		c.do("POST", "/api/v1/auth/forgot-password", "", map[string]string{"email": "baru@warta.test"}).
+			expect(http.StatusNoContent, nil)
+		if n := box.count("baru@warta.test"); n != 2 {
+			t.Fatalf("seharusnya 1 email verifikasi + 1 email reset, terkirim %d", n)
+		}
+		path, resetToken := box.lastLink(t, "baru@warta.test")
+		if path != "/reset-password" {
+			t.Fatalf("tautan reset: %s", path)
+		}
+
+		fields := c.do("POST", "/api/v1/auth/reset-password", "", map[string]string{"token": resetToken, "new_password": "pendek"}).
+			expectError(http.StatusUnprocessableEntity, "validation_failed")
+		if fields["new_password"] == "" {
+			t.Fatalf("password pendek: %v", fields)
+		}
+		c.do("POST", "/api/v1/auth/reset-password", "", map[string]string{"token": resetToken, "new_password": "rahasia-baru-99"}).
+			expect(http.StatusNoContent, nil)
+		c.do("POST", "/api/v1/auth/reset-password", "", map[string]string{"token": resetToken, "new_password": "rahasia-lain-99"}).
+			expectError(http.StatusUnprocessableEntity, "validation_failed")
+
+		// Semua sesi lama dicabut, password baru berlaku.
+		c.do("POST", "/api/v1/auth/refresh", "", map[string]string{"refresh_token": baru.RefreshToken}).
+			expectError(http.StatusUnauthorized, "unauthorized")
+		c.do("POST", "/api/v1/auth/login", "", map[string]string{"email": "baru@warta.test", "password": "rahasia123"}).
+			expectError(http.StatusUnauthorized, "unauthorized")
+		c.do("POST", "/api/v1/auth/login", "", map[string]string{"email": "baru@warta.test", "password": "rahasia-baru-99"}).
+			expect(http.StatusOK, nil)
+	})
+
+	t.Run("sitemap dan RSS", func(t *testing.T) {
+		c := client{t: t, base: server.URL}
+
+		res := c.do("GET", "/sitemap.xml", "", nil).expect(http.StatusOK, nil)
+		body := string(res.body)
+		if !strings.HasPrefix(res.header.Get("Content-Type"), "application/xml") || res.header.Get("Cache-Control") == "" {
+			t.Fatalf("header sitemap: %v", res.header)
+		}
+		for _, want := range []string{
+			"<loc>https://warta.test/</loc>",
+			"<loc>https://warta.test/artikel/" + published.Slug + "</loc>",
+			"<loc>https://warta.test/kategori/" + tech.Slug + "</loc>",
+		} {
+			if !strings.Contains(body, want) {
+				t.Errorf("sitemap tanpa %s:\n%s", want, body)
+			}
+		}
+		if strings.Contains(body, draft.Slug) {
+			t.Error("draft tidak boleh masuk sitemap")
+		}
+
+		res = c.do("GET", "/feed.xml", "", nil).expect(http.StatusOK, nil)
+		body = string(res.body)
+		if !strings.HasPrefix(res.header.Get("Content-Type"), "application/rss+xml") {
+			t.Fatalf("header RSS: %v", res.header)
+		}
+		for _, want := range []string{
+			`<rss version="2.0"`,
+			`<atom:link href="https://warta.test/feed.xml" rel="self" type="application/rss+xml">`,
+			"<link>https://warta.test/artikel/" + published.Slug + "</link>",
+			"<title>" + published.Title + "</title>",
+		} {
+			if !strings.Contains(body, want) {
+				t.Errorf("RSS tanpa %s:\n%s", want, body)
+			}
+		}
+		if strings.Contains(body, draft.Slug) {
+			t.Error("draft tidak boleh masuk RSS")
 		}
 	})
 
@@ -1003,7 +1193,7 @@ func TestLegacyPostsMigration(t *testing.T) {
 
 	migrate(t, cfg, latestVersion)
 
-	a, err := app.New(cfg, db, auth.BcryptHasher{Cost: bcrypt.MinCost})
+	a, err := app.New(cfg, db, auth.BcryptHasher{Cost: bcrypt.MinCost}, &outbox{})
 	if err != nil {
 		t.Fatal(err)
 	}

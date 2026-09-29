@@ -3,6 +3,8 @@ package service
 import (
 	"context"
 	"errors"
+	"net/url"
+	"regexp"
 	"testing"
 	"time"
 
@@ -11,6 +13,7 @@ import (
 	"warta/internal/apperr"
 	"warta/internal/auth"
 	"warta/internal/dto"
+	"warta/internal/mail"
 	"warta/internal/model"
 	"warta/internal/pagination"
 	"warta/internal/repository"
@@ -75,6 +78,91 @@ func (f *fakeUsers) UpdateRole(_ context.Context, id int64, role model.Role) err
 	return nil
 }
 
+func (f *fakeUsers) MarkEmailVerified(_ context.Context, id int64) error {
+	u := f.byID[id]
+	if u.EmailVerifiedAt == nil {
+		now := time.Now()
+		u.EmailVerifiedAt = &now
+	}
+	f.byID[id] = u
+	return nil
+}
+
+type fakeUserTokens struct {
+	rows    []model.UserToken
+	created []time.Time
+}
+
+func (f *fakeUserTokens) Replace(_ context.Context, t *model.UserToken) error {
+	now := time.Now()
+	for i := range f.rows {
+		if f.rows[i].UserID == t.UserID && f.rows[i].Purpose == t.Purpose && f.rows[i].UsedAt == nil {
+			f.rows[i].UsedAt = &now
+		}
+	}
+	t.ID = int64(len(f.rows) + 1)
+	f.rows = append(f.rows, *t)
+	f.created = append(f.created, now)
+	return nil
+}
+
+func (f *fakeUserTokens) FindByHash(_ context.Context, purpose, hash string) (model.UserToken, error) {
+	for _, t := range f.rows {
+		if t.TokenHash == hash && t.Purpose == purpose {
+			return t, nil
+		}
+	}
+	return model.UserToken{}, repository.ErrNotFound
+}
+
+func (f *fakeUserTokens) Use(_ context.Context, id int64) (bool, error) {
+	t := &f.rows[id-1]
+	if t.UsedAt != nil {
+		return false, nil
+	}
+	now := time.Now()
+	t.UsedAt = &now
+	return true, nil
+}
+
+func (f *fakeUserTokens) IssuedSince(_ context.Context, userID int64, purpose string, since time.Time) (bool, error) {
+	for i, t := range f.rows {
+		if t.UserID == userID && t.Purpose == purpose && f.created[i].After(since) {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+func (f *fakeUserTokens) DeleteExpired(context.Context, time.Time) (int64, error) {
+	return 0, nil
+}
+
+type fakeMailer struct {
+	sent []mail.Message
+}
+
+func (f *fakeMailer) Send(_ context.Context, m mail.Message) error {
+	f.sent = append(f.sent, m)
+	return nil
+}
+
+var linkToken = regexp.MustCompile(`\?token=(\S+)`)
+
+// tokenFrom mengambil token dari tautan di email terakhir.
+func tokenFrom(t *testing.T, m *fakeMailer) string {
+	t.Helper()
+	if len(m.sent) == 0 {
+		t.Fatal("tidak ada email terkirim")
+	}
+	match := linkToken.FindStringSubmatch(m.sent[len(m.sent)-1].Text)
+	if match == nil {
+		t.Fatalf("email tanpa tautan: %s", m.sent[len(m.sent)-1].Text)
+	}
+	token, _ := url.QueryUnescape(match[1])
+	return token
+}
+
 type fakeTokens struct {
 	rows []model.RefreshToken
 }
@@ -119,15 +207,21 @@ func (f *fakeTokens) DeleteExpired(context.Context, time.Time) (int64, error) {
 }
 
 func newAuthService() (*authService, *fakeTokens) {
+	s, tokens, _ := newAuthServiceWithMail()
+	return s, tokens
+}
+
+func newAuthServiceWithMail() (*authService, *fakeTokens, *fakeMailer) {
 	tokens := &fakeTokens{}
+	mailer := &fakeMailer{}
 	s := NewAuthService(
 		&fakeUsers{byID: map[int64]model.User{}},
 		tokens,
 		auth.BcryptHasher{Cost: bcrypt.MinCost},
 		auth.NewTokenManager("rahasia-test-yang-panjangnya-lebih-dari-32", "warta", time.Minute),
-		time.Hour,
+		AuthOptions{RefreshTTL: time.Hour, UserTokens: &fakeUserTokens{}, Mailer: mailer, AppURL: "https://warta.id"},
 	).(*authService)
-	return s, tokens
+	return s, tokens, mailer
 }
 
 func status(err error) int {
@@ -223,11 +317,112 @@ func TestEnsureAdmin(t *testing.T) {
 	}
 
 	me, _ := s.Me(ctx, auth.Actor{ID: pair.User.ID})
-	if me.Role != string(model.RoleAdmin) {
-		t.Fatalf("akun yang sudah ada seharusnya dinaikkan menjadi admin: %s", me.Role)
+	if me.Role != string(model.RoleAdmin) || !me.EmailVerified {
+		t.Fatalf("akun yang sudah ada seharusnya dinaikkan menjadi admin terverifikasi: %+v", me)
 	}
 	// Password akun yang sudah ada tidak diubah.
 	if _, err := s.Login(ctx, dto.LoginRequest{Email: "budi@warta.test", Password: "rahasia123"}); err != nil {
 		t.Fatalf("password lama: %v", err)
+	}
+}
+
+func TestVerifyEmail(t *testing.T) {
+	s, _, mailer := newAuthServiceWithMail()
+	ctx := context.Background()
+
+	pair, err := s.Register(ctx, dto.RegisterRequest{Name: "Budi", Email: "budi@warta.test", Password: "rahasia123"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pair.User.EmailVerified {
+		t.Fatal("akun baru belum terverifikasi")
+	}
+	if len(mailer.sent) != 1 || mailer.sent[0].To != "budi@warta.test" {
+		t.Fatalf("email verifikasi: %+v", mailer.sent)
+	}
+	token := tokenFrom(t, mailer)
+
+	actor := auth.Actor{ID: pair.User.ID}
+	if err := s.ResendVerification(ctx, actor); status(err) != 429 {
+		t.Fatalf("kirim ulang langsung seharusnya ditahan: %v", err)
+	}
+
+	me, err := s.VerifyEmail(ctx, dto.VerifyEmailRequest{Token: token})
+	if err != nil || !me.EmailVerified {
+		t.Fatalf("verifikasi: %+v %v", me, err)
+	}
+	if _, err := s.VerifyEmail(ctx, dto.VerifyEmailRequest{Token: token}); status(err) != 422 {
+		t.Fatalf("token hanya sekali pakai: %v", err)
+	}
+	if err := s.ResendVerification(ctx, actor); status(err) != 409 {
+		t.Fatalf("akun terverifikasi tidak perlu kirim ulang: %v", err)
+	}
+}
+
+func TestResetPassword(t *testing.T) {
+	s, tokens, mailer := newAuthServiceWithMail()
+	ctx := context.Background()
+
+	if _, err := s.Register(ctx, dto.RegisterRequest{Name: "Budi", Email: "budi@warta.test", Password: "rahasia123"}); err != nil {
+		t.Fatal(err)
+	}
+	mailer.sent = nil
+
+	// Email yang tidak terdaftar tetap berhasil, tanpa mengirim apa pun.
+	if err := s.ForgotPassword(ctx, dto.ForgotPasswordRequest{Email: "siapa@warta.test"}); err != nil {
+		t.Fatal(err)
+	}
+	if len(mailer.sent) != 0 {
+		t.Fatal("email tidak terdaftar tidak boleh dikirimi")
+	}
+
+	if err := s.ForgotPassword(ctx, dto.ForgotPasswordRequest{Email: " BUDI@warta.test"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.ForgotPassword(ctx, dto.ForgotPasswordRequest{Email: "budi@warta.test"}); err != nil {
+		t.Fatal(err)
+	}
+	if len(mailer.sent) != 1 {
+		t.Fatalf("permintaan beruntun cukup satu email, terkirim %d", len(mailer.sent))
+	}
+	token := tokenFrom(t, mailer)
+
+	if err := s.ResetPassword(ctx, dto.ResetPasswordRequest{Token: "palsu", NewPassword: "baru-sekali-1"}); status(err) != 422 {
+		t.Fatalf("token palsu: %v", err)
+	}
+	if err := s.ResetPassword(ctx, dto.ResetPasswordRequest{Token: token, NewPassword: "baru-sekali-1"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.ResetPassword(ctx, dto.ResetPasswordRequest{Token: token, NewPassword: "baru-lagi-22"}); status(err) != 422 {
+		t.Fatalf("token hanya sekali pakai: %v", err)
+	}
+
+	for _, row := range tokens.rows {
+		if row.RevokedAt == nil {
+			t.Fatal("semua sesi seharusnya dicabut setelah reset password")
+		}
+	}
+	pair, err := s.Login(ctx, dto.LoginRequest{Email: "budi@warta.test", Password: "baru-sekali-1"})
+	if err != nil {
+		t.Fatalf("login dengan password baru: %v", err)
+	}
+	if !pair.User.EmailVerified {
+		t.Fatal("reset lewat email sekaligus membuktikan email")
+	}
+}
+
+func TestResetTokenExpires(t *testing.T) {
+	s, _, mailer := newAuthServiceWithMail()
+	ctx := context.Background()
+
+	_, _ = s.Register(ctx, dto.RegisterRequest{Name: "Budi", Email: "budi@warta.test", Password: "rahasia123"})
+	if err := s.ForgotPassword(ctx, dto.ForgotPasswordRequest{Email: "budi@warta.test"}); err != nil {
+		t.Fatal(err)
+	}
+	token := tokenFrom(t, mailer)
+
+	s.now = func() time.Time { return time.Now().Add(resetPasswordTTL + time.Minute) }
+	if err := s.ResetPassword(ctx, dto.ResetPasswordRequest{Token: token, NewPassword: "baru-sekali-1"}); status(err) != 422 {
+		t.Fatalf("token kedaluwarsa: %v", err)
 	}
 }

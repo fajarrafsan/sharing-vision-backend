@@ -50,7 +50,32 @@ jadi selalu tersisa minimal satu admin.
 
 Akun admin pertama dibuat saat service menyala dari `ADMIN_EMAIL` dan
 `ADMIN_PASSWORD`. Bila email itu sudah terdaftar, akunnya dinaikkan menjadi
-admin tanpa mengubah password-nya.
+admin tanpa mengubah password-nya. Email admin dianggap sudah terverifikasi.
+
+### Verifikasi email dan lupa password
+
+Register mengirim email berisi tautan `APP_URL/verify-email?token=...`.
+Halaman frontend itu meneruskan token ke `POST /auth/verify-email`. Tautan
+berlaku 24 jam dan hanya sekali pakai; `POST /auth/resend-verification`
+mengirim yang baru (paling cepat sekali per menit) dan membatalkan yang lama.
+
+Bila `REQUIRE_EMAIL_VERIFICATION` aktif (bawaan di production), akun yang
+emailnya belum terverifikasi tidak bisa berkomentar atau melaporkan komentar
+(403 dengan kode `email_not_verified`); membaca, menyukai, dan menyimpan
+artikel tetap bisa. Field `email_verified` di data akun menunjukkan statusnya.
+Akun yang sudah ada sebelum fitur ini dianggap terverifikasi.
+
+Lupa password: `POST /auth/forgot-password` dengan `email` mengirim tautan
+`APP_URL/reset-password?token=...` yang berlaku 1 jam. Jawabannya selalu 204,
+terdaftar atau tidak emailnya, supaya endpoint ini tidak bisa dipakai menebak
+akun. `POST /auth/reset-password` dengan `token` dan `new_password` mengganti
+password, mencabut semua sesi, dan sekaligus menandai email terverifikasi.
+
+Seperti refresh token, di database hanya tersimpan hash token email. Email
+dikirim lewat SMTP (`SMTP_HOST` dan kawan-kawan) di latar belakang, jadi
+permintaan tidak menunggu server email. Tanpa `SMTP_HOST`, isi email hanya
+dicatat ke log service, cukup untuk mencoba di komputer sendiri: salin
+tautannya dari log.
 
 ### Token
 
@@ -63,7 +88,7 @@ Login dan register mengembalikan:
     "token_type": "Bearer",
     "expires_in": 900,
     "refresh_token": "g26hKLlInBVK...",
-    "user": { "id": 2, "name": "Budi", "email": "budi@warta.id", "role": "reader" }
+    "user": { "id": 2, "name": "Budi", "email": "budi@warta.id", "role": "reader", "email_verified": false }
   }
 }
 ```
@@ -91,6 +116,10 @@ Semua di bawah `/api/v1`. Kolom Akses: `-` publik, `login` semua role,
 | POST | `/auth/login` | - | login |
 | POST | `/auth/refresh` | - | menukar refresh token |
 | POST | `/auth/logout` | - | mencabut refresh token |
+| POST | `/auth/verify-email` | - | verifikasi email dengan token dari email |
+| POST | `/auth/resend-verification` | login | kirim ulang email verifikasi |
+| POST | `/auth/forgot-password` | - | minta tautan reset password |
+| POST | `/auth/reset-password` | - | password baru dengan token dari email |
 | GET, PATCH | `/me` | login | data akun sendiri, ganti nama |
 | PUT | `/me/password` | login | ganti password |
 | GET | `/me/articles` | login | artikel sendiri, semua status |
@@ -125,8 +154,13 @@ Semua di bawah `/api/v1`. Kolom Akses: `-` publik, `login` semua role,
 | POST | `/articles/{id}/view` | - | catat artikel dibaca |
 
 Di luar `/api/v1`: `GET /health`, `GET /health/ready` (ikut mengecek database),
-`GET /docs` (Swagger UI), `GET /api/v1/openapi.yaml`, dan `GET /uploads/{nama}`
-(gambar yang diunggah).
+`GET /docs` (Swagger UI), `GET /api/v1/openapi.yaml`, `GET /uploads/{nama}`
+(gambar yang diunggah), serta `GET /sitemap.xml` dan `GET /feed.xml` (RSS).
+
+Sitemap berisi beranda, kategori yang punya artikel, dan artikel terbit; RSS
+berisi 20 artikel terbit terbaru. Semua tautan di dalamnya menuju frontend
+(`APP_URL`), dan keduanya di-cache 15 menit. Frontend meneruskan
+`/sitemap.xml` dan `/feed.xml` di domainnya ke sini.
 
 Rincian lengkap setiap request dan response ada di `api/openapi.yaml`.
 
@@ -270,8 +304,8 @@ melepasnya dari semua artikel.
 endpoint publik, supaya klien tahu harus refresh alih-alih diam-diam
 diperlakukan sebagai pengunjung anonim.
 
-**Register, login, dan refresh dibatasi** `AUTH_RATE_LIMIT` permintaan per
-menit per IP (bawaan 20). Upload gambar dibatasi `UPLOAD_RATE_LIMIT` per menit
+**Register, login, refresh, verifikasi email, dan reset password dibatasi**
+`AUTH_RATE_LIMIT` permintaan per menit per IP (bawaan 20). Upload gambar dibatasi `UPLOAD_RATE_LIMIT` per menit
 per akun (bawaan 10). Kelebihannya dibalas 429 dengan header `Retry-After`.
 
 **IP pengunjung** dipakai untuk batas login dan hitungan dibaca. Bila service
@@ -393,6 +427,7 @@ internal/model       struct domain
 internal/pagination  membaca page dan per_page
 internal/slug        membuat slug
 internal/storage     menyimpan dan memeriksa gambar yang diunggah
+internal/mail        pengiriman email lewat SMTP dan templatnya
 internal/apperr      error yang membawa status HTTP
 internal/response    penulisan response JSON
 internal/logging     logger slog dengan request id
@@ -414,6 +449,9 @@ salah sekaligus bila konfigurasinya tidak valid.
 `CORS_ORIGINS` bawaannya `*`. Untuk penggunaan sungguhan, isi dengan origin
 frontend saja, dipisahkan koma bila lebih dari satu.
 
+`APP_URL` adalah alamat frontend (bawaan `http://localhost:5173`), dipakai
+untuk tautan di email, sitemap, dan RSS.
+
 ## Menjalankan di production
 
 Pakai `docker-compose.prod.yml` di atas `docker-compose.yml`. Override ini
@@ -429,8 +467,19 @@ dan menutup port MySQL dari luar server.
    ADMIN_EMAIL=admin@domainmu.id
    ADMIN_PASSWORD=<minimal 12 karakter>
    CORS_ORIGINS=https://domain-frontend-mu.id
+   APP_URL=https://domain-frontend-mu.id
    TRUSTED_PROXIES=<IP reverse proxy, bila ada>
+   SMTP_HOST=smtp.penyedia-email.com
+   SMTP_PORT=587
+   SMTP_USERNAME=<dari penyedia email>
+   SMTP_PASSWORD=<dari penyedia email>
+   MAIL_FROM=Warta <noreply@domainmu.id>
    ```
+
+   SMTP bisa dari penyedia email transaksional mana pun (Brevo, Mailgun,
+   Amazon SES, Resend, dan sejenisnya). Port 465 memakai TLS langsung, port
+   lain memakai STARTTLS. Pastikan domain `MAIL_FROM` sudah diatur SPF dan
+   DKIM-nya di penyedia itu supaya email tidak masuk spam.
 
 2. Jalankan:
 
@@ -441,7 +490,8 @@ dan menutup port MySQL dari luar server.
 Compose menolak jalan bila salah satu nilai wajib kosong. Service juga menolak
 menyala dalam mode production bila `JWT_SECRET` masih nilai contoh,
 `ADMIN_PASSWORD` kurang dari 12 karakter atau nilai contoh, `DB_PASSWORD`
-kosong atau nilai contoh, atau `CORS_ORIGINS` masih `*`.
+kosong atau nilai contoh, `CORS_ORIGINS` masih `*`, `APP_URL` bukan https,
+atau `SMTP_HOST` kosong.
 
 Image MySQL hanya membuat user dan password saat volume datanya masih kosong.
 Bila volume `warta_mysql_data` sudah pernah dipakai dengan pengaturan lama,

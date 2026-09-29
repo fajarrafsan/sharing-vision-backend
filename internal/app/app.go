@@ -11,6 +11,7 @@ import (
 	"warta/internal/clientip"
 	"warta/internal/config"
 	"warta/internal/handler"
+	"warta/internal/mail"
 	"warta/internal/middleware"
 	"warta/internal/pagination"
 	"warta/internal/repository"
@@ -28,9 +29,28 @@ type App struct {
 	Auth    service.AuthService
 
 	refreshTokens repository.RefreshTokenRepository
+	userTokens    repository.UserTokenRepository
 }
 
-func New(cfg config.Config, db *sql.DB, hasher auth.PasswordHasher) (*App, error) {
+// NewMailer memilih pengirim email dari konfigurasi: SMTP bila diatur, atau
+// hanya log untuk development.
+func NewMailer(cfg config.Config) mail.Mailer {
+	if cfg.SMTPHost == "" {
+		return mail.LogMailer{}
+	}
+	return mail.Async{
+		Mailer: mail.NewSMTPMailer(mail.SMTPConfig{
+			Host:     cfg.SMTPHost,
+			Port:     cfg.SMTPPort,
+			Username: cfg.SMTPUsername,
+			Password: cfg.SMTPPassword,
+			From:     cfg.MailFrom,
+		}),
+		Timeout: 30 * time.Second,
+	}
+}
+
+func New(cfg config.Config, db *sql.DB, hasher auth.PasswordHasher, mailer mail.Mailer) (*App, error) {
 	uploads, err := storage.NewLocal(cfg.UploadDir, cfg.MaxUploadBytes)
 	if err != nil {
 		return nil, err
@@ -50,8 +70,19 @@ func New(cfg config.Config, db *sql.DB, hasher auth.PasswordHasher) (*App, error
 	articles := repository.NewArticleRepository(db)
 	comments := repository.NewCommentRepository(db)
 	engagement := repository.NewEngagementRepository(db)
+	userTokens := repository.NewUserTokenRepository(db)
 
-	authService := service.NewAuthService(users, refreshTokens, hasher, tokens, cfg.RefreshTokenTTL)
+	authService := service.NewAuthService(users, refreshTokens, hasher, tokens, service.AuthOptions{
+		RefreshTTL: cfg.RefreshTokenTTL,
+		UserTokens: userTokens,
+		Mailer:     mailer,
+		AppURL:     cfg.AppURL,
+	})
+	commentService := service.NewCommentService(comments, articles, service.CommentOptions{
+		HideThreshold:        cfg.CommentHideThreshold,
+		RequireVerifiedEmail: cfg.RequireEmailVerification,
+		Users:                users,
+	})
 
 	handlers := router.Handlers{
 		Health:     handler.NewHealthHandler(db),
@@ -61,9 +92,10 @@ func New(cfg config.Config, db *sql.DB, hasher auth.PasswordHasher) (*App, error
 		Categories: handler.NewCategoryHandler(service.NewCategoryService(categories)),
 		Tags:       handler.NewTagHandler(service.NewTagService(tags), pages),
 		Articles:   handler.NewArticleHandler(service.NewArticleService(articles, categories, engagement, uploads), pages),
-		Comments:   handler.NewCommentHandler(service.NewCommentService(comments, articles, cfg.CommentHideThreshold), pages),
+		Comments:   handler.NewCommentHandler(commentService, pages),
 		Stats:      handler.NewStatsHandler(service.NewStatsService(repository.NewStatsRepository(db))),
 		Uploads:    handler.NewUploadHandler(uploads),
+		Feeds:      handler.NewFeedHandler(service.NewFeedService(articles, categories), cfg.AppURL),
 	}
 
 	return &App{
@@ -79,11 +111,12 @@ func New(cfg config.Config, db *sql.DB, hasher auth.PasswordHasher) (*App, error
 		}),
 		Auth:          authService,
 		refreshTokens: refreshTokens,
+		userTokens:    userTokens,
 	}, nil
 }
 
-// CleanupTokens menghapus refresh token kedaluwarsa secara berkala sampai ctx
-// selesai.
+// CleanupTokens menghapus refresh token dan token email yang kedaluwarsa
+// secara berkala sampai ctx selesai.
 func (a *App) CleanupTokens(ctx context.Context, every time.Duration) {
 	ticker := time.NewTicker(every)
 	defer ticker.Stop()
@@ -100,6 +133,11 @@ func (a *App) CleanupTokens(ctx context.Context, every time.Duration) {
 			}
 			if deleted > 0 {
 				slog.Info("refresh token kedaluwarsa dihapus", "jumlah", deleted)
+			}
+			if deleted, err := a.userTokens.DeleteExpired(ctx, time.Now()); err != nil {
+				slog.Error("gagal membersihkan token email", "error", err)
+			} else if deleted > 0 {
+				slog.Info("token email kedaluwarsa dihapus", "jumlah", deleted)
 			}
 		}
 	}

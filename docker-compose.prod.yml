@@ -28,5 +28,8 @@ services:
       ADMIN_EMAIL: ${ADMIN_EMAIL:?isi ADMIN_EMAIL di .env}
       ADMIN_PASSWORD: ${ADMIN_PASSWORD:?isi ADMIN_PASSWORD di .env}
       CORS_ORIGINS: ${CORS_ORIGINS:?isi CORS_ORIGINS dengan origin frontend}
+      APP_URL: ${APP_URL:?isi APP_URL dengan alamat https frontend}
+      SMTP_HOST: ${SMTP_HOST:?isi SMTP_HOST supaya email verifikasi dan reset password terkirim}
+      MAIL_FROM: ${MAIL_FROM:?isi MAIL_FROM, misalnya Warta <noreply@domainmu.id>}
       # IP reverse proxy di depan service, misalnya Nginx atau load balancer.
       TRUSTED_PROXIES: ${TRUSTED_PROXIES:-}

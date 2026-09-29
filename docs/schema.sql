@@ -18,6 +18,8 @@ CREATE TABLE IF NOT EXISTS users (
     email         VARCHAR(191)    NOT NULL,
     password_hash VARCHAR(255)    NOT NULL,
     role          VARCHAR(20)     NOT NULL DEFAULT 'reader',
+    -- NULL berarti email belum dibuktikan milik pengguna.
+    email_verified_at TIMESTAMP   NULL DEFAULT NULL,
     created_at    TIMESTAMP       NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at    TIMESTAMP       NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
     PRIMARY KEY (id),
@@ -38,6 +40,24 @@ CREATE TABLE IF NOT EXISTS refresh_tokens (
     KEY idx_refresh_tokens_user (user_id),
     KEY idx_refresh_tokens_expires (expires_at),
     CONSTRAINT fk_refresh_tokens_user FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE CASCADE
+) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4 COLLATE = utf8mb4_unicode_ci;
+
+-- Token sekali pakai yang dikirim lewat email: verifikasi alamat email dan
+-- reset password. Yang disimpan hanya hash-nya.
+CREATE TABLE IF NOT EXISTS user_tokens (
+    id         BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+    user_id    BIGINT UNSIGNED NOT NULL,
+    purpose    VARCHAR(20)     NOT NULL,
+    token_hash CHAR(64) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+    expires_at TIMESTAMP       NOT NULL,
+    used_at    TIMESTAMP       NULL DEFAULT NULL,
+    created_at TIMESTAMP       NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (id),
+    UNIQUE KEY uq_user_tokens_hash (token_hash),
+    KEY idx_user_tokens_user_purpose (user_id, purpose),
+    KEY idx_user_tokens_expires (expires_at),
+    CONSTRAINT chk_user_tokens_purpose CHECK (purpose IN ('verify_email', 'reset_password')),
+    CONSTRAINT fk_user_tokens_user FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE CASCADE
 ) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4 COLLATE = utf8mb4_unicode_ci;
 
 CREATE TABLE IF NOT EXISTS categories (

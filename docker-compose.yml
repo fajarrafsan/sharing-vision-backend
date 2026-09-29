@@ -44,6 +44,15 @@ services:
       ADMIN_EMAIL: ${ADMIN_EMAIL:-admin@warta.local}
       ADMIN_PASSWORD: ${ADMIN_PASSWORD:-admin12345}
       CORS_ORIGINS: ${CORS_ORIGINS:-*}
+      APP_URL: ${APP_URL:-http://localhost:5173}
+      # Tanpa SMTP_HOST, email verifikasi dan reset password dicatat ke log:
+      #   docker compose logs api | grep token=
+      SMTP_HOST: ${SMTP_HOST:-}
+      SMTP_PORT: ${SMTP_PORT:-587}
+      SMTP_USERNAME: ${SMTP_USERNAME:-}
+      SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+      MAIL_FROM: ${MAIL_FROM:-Warta <noreply@warta.local>}
+      REQUIRE_EMAIL_VERIFICATION: ${REQUIRE_EMAIL_VERIFICATION:-}
     volumes:
       - warta_uploads:/app/uploads
     # Untuk menjalankan beberapa instance sekaligus (docker compose up -d --scale api=3),

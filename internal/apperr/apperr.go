@@ -42,6 +42,12 @@ func Forbidden(message string) *Error {
 	return &Error{Status: http.StatusForbidden, Code: "forbidden", Message: message}
 }
 
+// EmailNotVerified dipakai untuk aksi yang butuh email terverifikasi. Kodenya
+// dibedakan dari forbidden supaya klien bisa menawarkan kirim ulang email.
+func EmailNotVerified(message string) *Error {
+	return &Error{Status: http.StatusForbidden, Code: "email_not_verified", Message: message}
+}
+
 func NotFound(message string) *Error {
 	return &Error{Status: http.StatusNotFound, Code: "not_found", Message: message}
 }

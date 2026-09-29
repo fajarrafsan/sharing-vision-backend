@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -73,6 +74,19 @@ type Config struct {
 	AdminEmail    string
 	AdminPassword string
 
+	// AppURL adalah alamat frontend. Dipakai untuk tautan di email, sitemap,
+	// dan RSS.
+	AppURL string
+	// RequireEmailVerification membuat akun yang emailnya belum terverifikasi
+	// tidak bisa berkomentar atau melaporkan komentar.
+	RequireEmailVerification bool
+	// SMTP kosong berarti email hanya dicatat ke log (development).
+	SMTPHost     string
+	SMTPPort     string
+	SMTPUsername string
+	SMTPPassword string
+	MailFrom     string
+
 	DBHost     string
 	DBPort     string
 	DBUser     string
@@ -115,12 +129,23 @@ func Load() (Config, error) {
 		AdminEmail:    strings.ToLower(l.str("ADMIN_EMAIL", "")),
 		AdminPassword: l.str("ADMIN_PASSWORD", ""),
 
+		AppURL:       strings.TrimRight(l.str("APP_URL", "http://localhost:5173"), "/"),
+		SMTPHost:     l.str("SMTP_HOST", ""),
+		SMTPPort:     l.str("SMTP_PORT", "587"),
+		SMTPUsername: l.str("SMTP_USERNAME", ""),
+		SMTPPassword: l.str("SMTP_PASSWORD", ""),
+		MailFrom:     l.str("MAIL_FROM", "Warta <noreply@warta.local>"),
+
 		DBHost:     l.str("DB_HOST", "127.0.0.1"),
 		DBPort:     l.str("DB_PORT", "3306"),
 		DBUser:     l.str("DB_USER", "root"),
 		DBPassword: l.str("DB_PASSWORD", ""),
 		DBName:     l.str("DB_NAME", "warta"),
 	}
+
+	// Verifikasi email wajib di production, opsional di development supaya
+	// bisa mencoba tanpa SMTP.
+	cfg.RequireEmailVerification = l.boolean("REQUIRE_EMAIL_VERIFICATION", cfg.Env == EnvProduction)
 
 	cfg.validate(&l)
 	return cfg, l.err()
@@ -149,6 +174,17 @@ func (c Config) validate(l *loader) {
 	if _, err := clientip.NewResolver(c.TrustedProxies); err != nil {
 		l.fail("TRUSTED_PROXIES: %v", err)
 	}
+	if u, err := url.Parse(c.AppURL); err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+		l.fail("APP_URL harus alamat lengkap frontend, misalnya https://warta.id")
+	}
+	if c.SMTPHost != "" {
+		if _, err := strconv.Atoi(c.SMTPPort); err != nil {
+			l.fail("SMTP_PORT harus berupa angka")
+		}
+		if (c.SMTPUsername == "") != (c.SMTPPassword == "") {
+			l.fail("SMTP_USERNAME dan SMTP_PASSWORD harus diisi berdua atau dikosongkan berdua")
+		}
+	}
 	if (c.AdminEmail == "") != (c.AdminPassword == "") {
 		l.fail("ADMIN_EMAIL dan ADMIN_PASSWORD harus diisi berdua atau dikosongkan berdua")
 	}
@@ -173,6 +209,12 @@ func (c Config) validate(l *loader) {
 			l.fail("CORS_ORIGINS tidak boleh * di production; isi dengan origin frontend")
 		}
 	}
+	if !strings.HasPrefix(c.AppURL, "https://") {
+		l.fail("APP_URL harus https di production")
+	}
+	if c.SMTPHost == "" {
+		l.fail("SMTP_HOST wajib di production supaya email verifikasi dan reset password terkirim")
+	}
 }
 
 // Warnings adalah hal yang tidak menghentikan service tapi sebaiknya
@@ -188,6 +230,9 @@ func (c Config) Warnings() []string {
 	}
 	if weakPasswords[strings.ToLower(c.AdminPassword)] && c.AdminPassword != "" {
 		warnings = append(warnings, "ADMIN_PASSWORD masih nilai contoh; ganti sebelum dipakai orang lain")
+	}
+	if c.SMTPHost == "" {
+		warnings = append(warnings, "SMTP_HOST kosong; email verifikasi dan reset password hanya dicatat ke log")
 	}
 	return warnings
 }

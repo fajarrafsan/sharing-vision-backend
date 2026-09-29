@@ -34,15 +34,52 @@ type CommentService interface {
 // yang sama dianggap kiriman ganda.
 const duplicateWindow = 10 * time.Minute
 
-type commentService struct {
-	comments      repository.CommentRepository
-	articles      repository.ArticleRepository
-	hideThreshold int
-	now           func() time.Time
+type CommentOptions struct {
+	// HideThreshold adalah jumlah laporan yang menyembunyikan komentar.
+	HideThreshold int
+	// RequireVerifiedEmail membuat hanya akun dengan email terverifikasi yang
+	// bisa berkomentar dan melapor. Users wajib diisi bila true.
+	RequireVerifiedEmail bool
+	Users                repository.UserRepository
 }
 
-func NewCommentService(comments repository.CommentRepository, articles repository.ArticleRepository, hideThreshold int) CommentService {
-	return &commentService{comments: comments, articles: articles, hideThreshold: hideThreshold, now: time.Now}
+type commentService struct {
+	comments        repository.CommentRepository
+	articles        repository.ArticleRepository
+	users           repository.UserRepository
+	hideThreshold   int
+	requireVerified bool
+	now             func() time.Time
+}
+
+func NewCommentService(comments repository.CommentRepository, articles repository.ArticleRepository, opt CommentOptions) CommentService {
+	return &commentService{
+		comments:        comments,
+		articles:        articles,
+		users:           opt.Users,
+		hideThreshold:   opt.HideThreshold,
+		requireVerified: opt.RequireVerifiedEmail,
+		now:             time.Now,
+	}
+}
+
+// ensureVerified dibaca dari database, bukan dari access token, supaya
+// verifikasi langsung berlaku tanpa menunggu token diperbarui.
+func (s *commentService) ensureVerified(ctx context.Context, actor auth.Actor, action string) error {
+	if !s.requireVerified {
+		return nil
+	}
+	user, err := s.users.FindByID(ctx, actor.ID)
+	if errors.Is(err, repository.ErrNotFound) {
+		return apperr.Unauthorized("akun tidak ditemukan")
+	}
+	if err != nil {
+		return apperr.Internal(err)
+	}
+	if user.EmailVerifiedAt == nil {
+		return apperr.EmailNotVerified("verifikasi email dulu sebelum " + action)
+	}
+	return nil
 }
 
 var errCommentNotFound = apperr.NotFound("komentar tidak ditemukan")
@@ -60,6 +97,9 @@ func (s *commentService) List(ctx context.Context, actor auth.Actor, articleID i
 }
 
 func (s *commentService) Create(ctx context.Context, actor auth.Actor, articleID int64, req dto.CommentRequest) (dto.CommentResponse, error) {
+	if err := s.ensureVerified(ctx, actor, "berkomentar"); err != nil {
+		return dto.CommentResponse{}, err
+	}
 	article, err := s.visibleArticle(ctx, actor, articleID)
 	if err != nil {
 		return dto.CommentResponse{}, err
@@ -179,6 +219,9 @@ func (s *commentService) Report(ctx context.Context, actor auth.Actor, id int64,
 	}
 	if comment.UserID == actor.ID {
 		return dto.ReportResponse{}, apperr.Forbidden("tidak bisa melaporkan komentar sendiri")
+	}
+	if err := s.ensureVerified(ctx, actor, "melaporkan komentar"); err != nil {
+		return dto.ReportResponse{}, err
 	}
 
 	count, err := s.comments.Report(ctx, id, actor.ID, req.Reason)

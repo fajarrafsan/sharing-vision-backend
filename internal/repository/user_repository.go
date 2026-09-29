@@ -22,6 +22,7 @@ type UserRepository interface {
 	UpdateName(ctx context.Context, id int64, name string) error
 	UpdatePassword(ctx context.Context, id int64, hash string) error
 	UpdateRole(ctx context.Context, id int64, role model.Role) error
+	MarkEmailVerified(ctx context.Context, id int64) error
 }
 
 type userRepository struct {
@@ -32,16 +33,19 @@ func NewUserRepository(db *sql.DB) UserRepository {
 	return &userRepository{db: db}
 }
 
-const userColumns = "id, name, email, password_hash, role, created_at, updated_at"
+const userColumns = "id, name, email, password_hash, role, email_verified_at, created_at, updated_at"
 
 func scanUser(row interface{ Scan(...any) error }, u *model.User) error {
-	return row.Scan(&u.ID, &u.Name, &u.Email, &u.PasswordHash, &u.Role, &u.CreatedAt, &u.UpdatedAt)
+	var verified sql.NullTime
+	err := row.Scan(&u.ID, &u.Name, &u.Email, &u.PasswordHash, &u.Role, &verified, &u.CreatedAt, &u.UpdatedAt)
+	u.EmailVerifiedAt = nullTimePtr(verified)
+	return err
 }
 
 func (r *userRepository) Create(ctx context.Context, u *model.User) error {
 	result, err := r.db.ExecContext(ctx,
-		"INSERT INTO users (name, email, password_hash, role) VALUES (?, ?, ?, ?)",
-		u.Name, u.Email, u.PasswordHash, u.Role)
+		"INSERT INTO users (name, email, password_hash, role, email_verified_at) VALUES (?, ?, ?, ?, ?)",
+		u.Name, u.Email, u.PasswordHash, u.Role, u.EmailVerifiedAt)
 	if err != nil {
 		return mapError(err)
 	}
@@ -130,4 +134,8 @@ func (r *userRepository) UpdateRole(ctx context.Context, id int64, role model.Ro
 func (r *userRepository) update(ctx context.Context, query string, args ...any) error {
 	_, err := r.db.ExecContext(ctx, query, args...)
 	return mapError(err)
+}
+
+func (r *userRepository) MarkEmailVerified(ctx context.Context, id int64) error {
+	return r.update(ctx, "UPDATE users SET email_verified_at = COALESCE(email_verified_at, CURRENT_TIMESTAMP) WHERE id = ?", id)
 }

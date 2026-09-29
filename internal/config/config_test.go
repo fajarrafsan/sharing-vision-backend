@@ -20,6 +20,8 @@ func valid() Config {
 		AdminEmail:           "admin@warta.local",
 		AdminPassword:        "admin12345",
 		DBPassword:           "root",
+		AppURL:               "http://localhost:5173",
+		SMTPPort:             "587",
 	}
 }
 
@@ -35,7 +37,7 @@ func TestDevelopmentAllowsExampleValues(t *testing.T) {
 	if p := problems(c); p != "" {
 		t.Fatalf("mode development seharusnya menerima nilai contoh: %s", p)
 	}
-	if len(c.Warnings()) != 2 {
+	if len(c.Warnings()) != 3 {
 		t.Fatalf("seharusnya ada peringatan: %v", c.Warnings())
 	}
 }
@@ -46,7 +48,7 @@ func TestProductionRejectsUnsafeValues(t *testing.T) {
 	c.JWTSecret = "ganti-dengan-rahasia-acak-minimal-32-karakter"
 
 	p := problems(c)
-	for _, want := range []string{"JWT_SECRET", "ADMIN_PASSWORD", "DB_PASSWORD", "CORS_ORIGINS"} {
+	for _, want := range []string{"JWT_SECRET", "ADMIN_PASSWORD", "DB_PASSWORD", "CORS_ORIGINS", "APP_URL", "SMTP_HOST"} {
 		if !strings.Contains(p, want) {
 			t.Errorf("%s seharusnya ditolak: %s", want, p)
 		}
@@ -56,6 +58,10 @@ func TestProductionRejectsUnsafeValues(t *testing.T) {
 	c.AdminPassword = "Kuat-dan-panjang-2026"
 	c.DBPassword = "db-rahasia-yang-acak"
 	c.CORSOrigins = []string{"https://warta.id"}
+	c.AppURL = "https://warta.id"
+	c.SMTPHost = "smtp.example.com"
+	c.SMTPUsername = "warta"
+	c.SMTPPassword = "smtp-rahasia"
 	if p := problems(c); p != "" {
 		t.Fatalf("konfigurasi production yang aman ditolak: %s", p)
 	}
@@ -69,5 +75,13 @@ func TestTrustedProxiesValidated(t *testing.T) {
 	c.TrustedProxies = []string{"10.0.0.0/8", "bukan-ip"}
 	if p := problems(c); !strings.Contains(p, "TRUSTED_PROXIES") {
 		t.Fatalf("TRUSTED_PROXIES yang salah seharusnya ditolak: %q", p)
+	}
+}
+
+func TestAppURLValidated(t *testing.T) {
+	c := valid()
+	c.AppURL = "warta.id"
+	if p := problems(c); !strings.Contains(p, "APP_URL") {
+		t.Fatalf("APP_URL tanpa skema seharusnya ditolak: %q", p)
 	}
 }

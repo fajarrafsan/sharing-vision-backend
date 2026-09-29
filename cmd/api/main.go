@@ -56,7 +56,7 @@ func run() error {
 	}
 	defer db.Close()
 
-	a, err := app.New(cfg, db, auth.BcryptHasher{Cost: bcrypt.DefaultCost})
+	a, err := app.New(cfg, db, auth.BcryptHasher{Cost: bcrypt.DefaultCost}, app.NewMailer(cfg))
 	if err != nil {
 		return errors.Join(errors.New("gagal menyiapkan service"), err)
 	}

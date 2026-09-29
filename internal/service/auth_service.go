@@ -3,12 +3,14 @@ package service
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"sync"
 	"time"
 
 	"warta/internal/apperr"
 	"warta/internal/auth"
 	"warta/internal/dto"
+	"warta/internal/mail"
 	"warta/internal/model"
 	"warta/internal/repository"
 	"warta/internal/validation"
@@ -24,14 +26,37 @@ type AuthService interface {
 	UpdateProfile(ctx context.Context, actor auth.Actor, req dto.UpdateProfileRequest) (dto.UserResponse, error)
 	ChangePassword(ctx context.Context, actor auth.Actor, req dto.ChangePasswordRequest) error
 
+	// VerifyEmail menandai email terverifikasi dari tautan yang dikirim saat
+	// mendaftar.
+	VerifyEmail(ctx context.Context, req dto.VerifyEmailRequest) (dto.UserResponse, error)
+	ResendVerification(ctx context.Context, actor auth.Actor) error
+	// ForgotPassword selalu berhasil, terdaftar atau tidak emailnya, supaya
+	// endpoint ini tidak bisa dipakai menebak email yang terdaftar.
+	ForgotPassword(ctx context.Context, req dto.ForgotPasswordRequest) error
+	ResetPassword(ctx context.Context, req dto.ResetPasswordRequest) error
+
 	// EnsureAdmin membuat akun admin pertama bila belum ada, dipanggil saat
 	// service menyala.
 	EnsureAdmin(ctx context.Context, name, email, password string) error
 }
 
+// AuthOptions adalah pengaturan tambahan AuthService.
+type AuthOptions struct {
+	RefreshTTL time.Duration
+	// UserTokens menyimpan token sekali pakai untuk verifikasi email dan
+	// reset password.
+	UserTokens repository.UserTokenRepository
+	Mailer     mail.Mailer
+	// AppURL adalah alamat frontend, awal tautan di email.
+	AppURL string
+}
+
 type authService struct {
 	users      repository.UserRepository
 	tokens     repository.RefreshTokenRepository
+	userTokens repository.UserTokenRepository
+	mailer     mail.Mailer
+	appURL     string
 	hasher     auth.PasswordHasher
 	jwt        *auth.TokenManager
 	refreshTTL time.Duration
@@ -46,14 +71,17 @@ func NewAuthService(
 	tokens repository.RefreshTokenRepository,
 	hasher auth.PasswordHasher,
 	jwt *auth.TokenManager,
-	refreshTTL time.Duration,
+	opt AuthOptions,
 ) AuthService {
 	return &authService{
 		users:      users,
 		tokens:     tokens,
+		userTokens: opt.UserTokens,
+		mailer:     opt.Mailer,
+		appURL:     opt.AppURL,
 		hasher:     hasher,
 		jwt:        jwt,
-		refreshTTL: refreshTTL,
+		refreshTTL: opt.RefreshTTL,
 		now:        time.Now,
 	}
 }
@@ -88,6 +116,12 @@ func (s *authService) Register(ctx context.Context, req dto.RegisterRequest) (dt
 			return dto.TokenResponse{}, emailTaken()
 		}
 		return dto.TokenResponse{}, apperr.Internal(err)
+	}
+
+	// Pendaftaran tetap berhasil walau email gagal dikirim; pengguna bisa
+	// meminta kirim ulang.
+	if err := s.sendVerification(ctx, user); err != nil {
+		slog.ErrorContext(ctx, "gagal menyiapkan email verifikasi", "user_id", user.ID, "error", err)
 	}
 
 	return s.issue(ctx, user)
@@ -253,10 +287,17 @@ func (s *authService) ChangePassword(ctx context.Context, actor auth.Actor, req 
 }
 
 func (s *authService) EnsureAdmin(ctx context.Context, name, email, password string) error {
+	// Email admin berasal dari konfigurasi server, jadi dianggap
+	// terverifikasi.
 	user, err := s.users.FindByEmail(ctx, email)
 	if err == nil {
 		if user.Role != model.RoleAdmin {
-			return s.users.UpdateRole(ctx, user.ID, model.RoleAdmin)
+			if err := s.users.UpdateRole(ctx, user.ID, model.RoleAdmin); err != nil {
+				return err
+			}
+		}
+		if user.EmailVerifiedAt == nil {
+			return s.users.MarkEmailVerified(ctx, user.ID)
 		}
 		return nil
 	}
@@ -269,7 +310,8 @@ func (s *authService) EnsureAdmin(ctx context.Context, name, email, password str
 		return err
 	}
 
-	admin := model.User{Name: name, Email: email, PasswordHash: hash, Role: model.RoleAdmin}
+	verified := s.now()
+	admin := model.User{Name: name, Email: email, PasswordHash: hash, Role: model.RoleAdmin, EmailVerifiedAt: &verified}
 	return s.users.Create(ctx, &admin)
 }
 

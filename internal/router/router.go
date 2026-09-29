@@ -23,6 +23,7 @@ type Handlers struct {
 	Comments   *handler.CommentHandler
 	Stats      *handler.StatsHandler
 	Uploads    *handler.UploadHandler
+	Feeds      *handler.FeedHandler
 }
 
 type Options struct {
@@ -64,12 +65,18 @@ func New(h Handlers, opt Options) http.Handler {
 	route("GET /health/live", h.Health.Live)
 	route("GET /health/ready", h.Health.Ready)
 	route("GET /docs", h.Docs.UI)
+	route("GET /sitemap.xml", h.Feeds.Sitemap)
+	route("GET /feed.xml", h.Feeds.RSS)
 	route("GET /api/v1/openapi.yaml", h.Docs.Spec)
 
 	route("POST /api/v1/auth/register", h.Auth.Register, limited)
 	route("POST /api/v1/auth/login", h.Auth.Login, limited)
 	route("POST /api/v1/auth/refresh", h.Auth.Refresh, limited)
 	route("POST /api/v1/auth/logout", h.Auth.Logout)
+	route("POST /api/v1/auth/verify-email", h.Auth.VerifyEmail, limited)
+	route("POST /api/v1/auth/resend-verification", h.Auth.ResendVerification, signedIn, limited)
+	route("POST /api/v1/auth/forgot-password", h.Auth.ForgotPassword, limited)
+	route("POST /api/v1/auth/reset-password", h.Auth.ResetPassword, limited)
 
 	route("GET /api/v1/me", h.Auth.Me, signedIn)
 	route("PATCH /api/v1/me", h.Auth.UpdateMe, signedIn)

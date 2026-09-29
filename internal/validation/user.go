@@ -47,6 +47,21 @@ func ValidateChangePassword(r dto.ChangePasswordRequest) map[string]string {
 	return problems
 }
 
+func ValidateForgotPassword(r dto.ForgotPasswordRequest) map[string]string {
+	problems := make(map[string]string)
+	emailProblem(problems, r.Email)
+	return problems
+}
+
+func ValidateResetPassword(r dto.ResetPasswordRequest) map[string]string {
+	problems := make(map[string]string)
+	if r.Token == "" {
+		problems["token"] = "token wajib diisi"
+	}
+	passwordProblem(problems, "new_password", r.NewPassword)
+	return problems
+}
+
 func ValidateRole(r dto.UpdateRoleRequest) map[string]string {
 	problems := make(map[string]string)
 	switch {

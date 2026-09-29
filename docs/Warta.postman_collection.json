@@ -2,7 +2,7 @@
 	"info": {
 		"_postman_id": "6f1c2a10-4b7d-4f4e-9d3a-1c9b7f0d2e51",
 		"name": "Warta API",
-		"description": "Seluruh alur Warta API v1: auth, role, kategori, artikel, tag, dan komentar.\n\nUrutan request sudah disusun agar bisa dijalankan dari atas ke bawah dalam satu kali Run. Email akun dibuat unik setiap Run, jadi koleksi ini bisa dijalankan berulang kali.\n\nSesuaikan base_url, admin_email, dan admin_password dengan environment service.",
+		"description": "Seluruh alur Warta API v1: auth, role, kategori, artikel, tag, dan komentar.\n\nUrutan request sudah disusun agar bisa dijalankan dari atas ke bawah dalam satu kali Run. Email akun dibuat unik setiap Run, jadi koleksi ini bisa dijalankan berulang kali.\n\nSesuaikan base_url, admin_email, dan admin_password dengan environment service. Jalankan dengan REQUIRE_EMAIL_VERIFICATION=false (bawaan development), karena akun baru di koleksi ini tidak memverifikasi email sebelum berkomentar.",
 		"schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
 	},
 	"variable": [
@@ -658,6 +658,95 @@
 					"response": []
 				},
 				{
+					"name": "Lupa password",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"type": "text/javascript",
+								"exec": [
+									"pm.test('status 204', () => pm.response.to.have.status(204));"
+								]
+							}
+						}
+					],
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"url": {
+							"raw": "{{base_url}}/api/v1/auth/forgot-password",
+							"host": [
+								"{{base_url}}"
+							],
+							"path": [
+								"api",
+								"v1",
+								"auth",
+								"forgot-password"
+							]
+						},
+						"description": "Selalu 204, terdaftar atau tidak emailnya. Tautan reset dikirim ke email (atau dicatat ke log service bila SMTP belum diatur).",
+						"auth": {
+							"type": "noauth"
+						},
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"email\": \"penulis-{{run_id}}@warta.test\"\n}"
+						}
+					},
+					"response": []
+				},
+				{
+					"name": "Token verifikasi palsu ditolak",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"type": "text/javascript",
+								"exec": [
+									"pm.test('status 422', () => pm.response.to.have.status(422));",
+									"pm.test('kode error validation_failed', () => pm.expect(pm.response.json().error.code).to.eql('validation_failed'));"
+								]
+							}
+						}
+					],
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"url": {
+							"raw": "{{base_url}}/api/v1/auth/verify-email",
+							"host": [
+								"{{base_url}}"
+							],
+							"path": [
+								"api",
+								"v1",
+								"auth",
+								"verify-email"
+							]
+						},
+						"description": "Token asli ada di tautan email verifikasi yang dikirim saat register.",
+						"auth": {
+							"type": "noauth"
+						},
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"token\": \"bukan-token-asli\"\n}"
+						}
+					},
+					"response": []
+				},
+				{
 					"name": "Tanpa token",
 					"event": [
 						{
@@ -1089,6 +1178,70 @@
 								"v1",
 								"articles",
 								"{{article_slug}}"
+							]
+						},
+						"auth": {
+							"type": "noauth"
+						}
+					},
+					"response": []
+				},
+				{
+					"name": "Sitemap memuat artikel terbit",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"type": "text/javascript",
+								"exec": [
+									"pm.test('status 200', () => pm.response.to.have.status(200));",
+									"pm.test('ada tautan artikel', () => pm.expect(pm.response.text()).to.include('/artikel/' + pm.collectionVariables.get('article_slug')));"
+								]
+							}
+						}
+					],
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/sitemap.xml",
+							"host": [
+								"{{base_url}}"
+							],
+							"path": [
+								"sitemap.xml"
+							]
+						},
+						"auth": {
+							"type": "noauth"
+						}
+					},
+					"response": []
+				},
+				{
+					"name": "RSS memuat artikel terbit",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"type": "text/javascript",
+								"exec": [
+									"pm.test('status 200', () => pm.response.to.have.status(200));",
+									"pm.test('tipe RSS', () => pm.expect(pm.response.headers.get('Content-Type')).to.include('application/rss+xml'));"
+								]
+							}
+						}
+					],
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/feed.xml",
+							"host": [
+								"{{base_url}}"
+							],
+							"path": [
+								"feed.xml"
 							]
 						},
 						"auth": {

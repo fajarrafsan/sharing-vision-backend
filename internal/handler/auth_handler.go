@@ -120,3 +120,58 @@ func (h *AuthHandler) ChangePassword(w http.ResponseWriter, r *http.Request) {
 
 	response.NoContent(w)
 }
+
+func (h *AuthHandler) VerifyEmail(w http.ResponseWriter, r *http.Request) {
+	var req dto.VerifyEmailRequest
+	if err := decodeJSON(r, &req); err != nil {
+		response.Error(w, r, err)
+		return
+	}
+
+	user, err := h.service.VerifyEmail(r.Context(), req)
+	if err != nil {
+		response.Error(w, r, err)
+		return
+	}
+
+	response.Data(w, http.StatusOK, user)
+}
+
+func (h *AuthHandler) ResendVerification(w http.ResponseWriter, r *http.Request) {
+	if err := h.service.ResendVerification(r.Context(), auth.ActorFrom(r.Context())); err != nil {
+		response.Error(w, r, err)
+		return
+	}
+
+	response.NoContent(w)
+}
+
+func (h *AuthHandler) ForgotPassword(w http.ResponseWriter, r *http.Request) {
+	var req dto.ForgotPasswordRequest
+	if err := decodeJSON(r, &req); err != nil {
+		response.Error(w, r, err)
+		return
+	}
+
+	if err := h.service.ForgotPassword(r.Context(), req); err != nil {
+		response.Error(w, r, err)
+		return
+	}
+
+	response.NoContent(w)
+}
+
+func (h *AuthHandler) ResetPassword(w http.ResponseWriter, r *http.Request) {
+	var req dto.ResetPasswordRequest
+	if err := decodeJSON(r, &req); err != nil {
+		response.Error(w, r, err)
+		return
+	}
+
+	if err := h.service.ResetPassword(r.Context(), req); err != nil {
+		response.Error(w, r, err)
+		return
+	}
+
+	response.NoContent(w)
+}

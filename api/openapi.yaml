@@ -19,6 +19,13 @@ info:
     **Role.** Akun baru selalu `reader` (bisa berkomentar). Admin menaikkannya
     menjadi `author` (bisa menulis artikel) atau `admin`.
 
+    **Verifikasi email.** Register mengirim email berisi tautan
+    `APP_URL/verify-email?token=...`; frontend meneruskan token itu ke
+    `/auth/verify-email`. Bila `REQUIRE_EMAIL_VERIFICATION` aktif (bawaan di
+    production), akun yang belum terverifikasi ditolak saat berkomentar atau
+    melapor dengan kode `email_not_verified`. Lupa password bekerja serupa
+    lewat `APP_URL/reset-password?token=...`.
+
     **Bentuk response.** Sukses: `{"data": ...}`, ditambah `meta` untuk daftar
     berhalaman. Gagal: `{"error": {"code", "message", "fields"}}`.
 servers:
@@ -47,6 +54,8 @@ tags:
     description: Komentar pembaca pada artikel yang sudah terbit
   - name: Interaksi
     description: Suka, bookmark, hitungan dibaca, dan upload gambar sampul
+  - name: SEO
+    description: Sitemap dan RSS untuk mesin pencari dan pembaca feed
   - name: Health
     description: Pemeriksaan untuk orkestrator dan load balancer
 
@@ -83,6 +92,31 @@ paths:
         "503":
           description: Database tidak terjangkau
 
+  /sitemap.xml:
+    get:
+      operationId: sitemap
+      tags: [SEO]
+      summary: Sitemap beranda, kategori, dan artikel terbit
+      description: Semua tautan menuju frontend (`APP_URL`). Di-cache 15 menit.
+      security: [{}]
+      responses:
+        "200":
+          description: OK
+          content:
+            application/xml:
+              schema: { type: string }
+  /feed.xml:
+    get:
+      operationId: rssFeed
+      tags: [SEO]
+      summary: RSS 2.0 berisi 20 artikel terbit terbaru
+      security: [{}]
+      responses:
+        "200":
+          description: OK
+          content:
+            application/rss+xml:
+              schema: { type: string }
   /api/v1/auth/register:
     post:
       operationId: register
@@ -156,6 +190,75 @@ paths:
       responses:
         "204": { description: "Berhasil, juga untuk token yang tidak dikenal" }
         "422": { $ref: "#/components/responses/ValidationFailed" }
+  /api/v1/auth/verify-email:
+    post:
+      operationId: verifyEmail
+      tags: [Auth]
+      summary: Memverifikasi email dengan token dari tautan email
+      description: Token berlaku 24 jam dan hanya sekali pakai. Tidak perlu login.
+      security: [{}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/TokenRequest" }
+      responses:
+        "200":
+          description: Terverifikasi
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/UserEnvelope" }
+        "422": { $ref: "#/components/responses/ValidationFailed" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
+  /api/v1/auth/resend-verification:
+    post:
+      operationId: resendVerification
+      tags: [Auth]
+      summary: Mengirim ulang email verifikasi
+      description: Tautan lama tidak berlaku lagi. Paling cepat sekali per menit.
+      security: [{ bearerAuth: [] }]
+      responses:
+        "204": { description: Email dikirim }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
+  /api/v1/auth/forgot-password:
+    post:
+      operationId: forgotPassword
+      tags: [Auth]
+      summary: Meminta tautan reset password
+      description: |
+        Selalu 204, terdaftar atau tidak emailnya, supaya tidak bisa dipakai
+        menebak akun. Tautan berlaku 1 jam; permintaan beruntun dalam satu
+        menit tidak mengirim email baru.
+      security: [{}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ForgotPasswordRequest" }
+      responses:
+        "204": { description: Diterima }
+        "422": { $ref: "#/components/responses/ValidationFailed" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
+  /api/v1/auth/reset-password:
+    post:
+      operationId: resetPassword
+      tags: [Auth]
+      summary: Membuat password baru dengan token dari email
+      description: |
+        Token sekali pakai. Semua sesi (refresh token) akun itu dicabut, dan
+        emailnya sekaligus dianggap terverifikasi.
+      security: [{}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ResetPasswordRequest" }
+      responses:
+        "204": { description: Password diganti }
+        "422": { $ref: "#/components/responses/ValidationFailed" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
 
   /api/v1/me:
     get:
@@ -797,6 +900,8 @@ paths:
         Aturan anti-spam: paling banyak 2 tautan, tidak seluruhnya huruf
         kapital, komentar yang sama persis dalam 10 menit ditolak (409), dan
         tiap akun dibatasi `COMMENT_RATE_LIMIT` komentar per menit (429).
+        Bila verifikasi email diwajibkan, akun yang belum terverifikasi
+        ditolak dengan 403 `email_not_verified`.
       security: [{ bearerAuth: [] }]
       parameters: [{ $ref: "#/components/parameters/Id" }]
       requestBody:
@@ -1054,6 +1159,7 @@ components:
                 - bad_request
                 - unauthorized
                 - forbidden
+                - email_not_verified
                 - not_found
                 - method_not_allowed
                 - conflict
@@ -1083,6 +1189,7 @@ components:
         name: { type: string }
         email: { type: string, format: email }
         role: { $ref: "#/components/schemas/Role" }
+        email_verified: { type: boolean }
         created_at: { type: string, format: date-time }
         updated_at: { type: string, format: date-time }
     Author:
@@ -1264,6 +1371,22 @@ components:
       required: [refresh_token]
       properties:
         refresh_token: { type: string }
+    TokenRequest:
+      type: object
+      required: [token]
+      properties:
+        token: { type: string }
+    ForgotPasswordRequest:
+      type: object
+      required: [email]
+      properties:
+        email: { type: string, format: email }
+    ResetPasswordRequest:
+      type: object
+      required: [token, new_password]
+      properties:
+        token: { type: string }
+        new_password: { type: string, minLength: 8, description: Maksimal 72 byte }
     UpdateProfileRequest:
       type: object
       required: [name]
