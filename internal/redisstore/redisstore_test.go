@@ -69,17 +69,27 @@ func TestLimiterRefills(t *testing.T) {
 	client := connect(t)
 	ctx := context.Background()
 
-	// 600 per menit = satu token tiap 100 ms.
-	l := NewLimiter(client, unique(t), 600)
-	for range 600 {
-		l.Allow(ctx, "k")
+	// 60 per menit = satu token per detik. Token dikuras sampai benar-benar
+	// ditolak, jadi test tidak bergantung pada cepat lambatnya mesin.
+	l := NewLimiter(client, unique(t), 60)
+	var wait time.Duration
+	for i := 0; ; i++ {
+		ok, w := l.Allow(ctx, "k")
+		if !ok {
+			wait = w
+			break
+		}
+		if i > 120 {
+			t.Fatal("token tidak pernah habis")
+		}
 	}
-	if ok, _ := l.Allow(ctx, "k"); ok {
-		t.Fatal("seharusnya habis")
+	if wait <= 0 || wait > time.Second {
+		t.Fatalf("waktu tunggu %v, ingin antara 0 dan 1 detik", wait)
 	}
-	time.Sleep(150 * time.Millisecond)
+
+	time.Sleep(wait + 50*time.Millisecond)
 	if ok, _ := l.Allow(ctx, "k"); !ok {
-		t.Fatal("token seharusnya terisi kembali")
+		t.Fatal("token seharusnya terisi kembali setelah waktu tunggu")
 	}
 }
 
@@ -99,8 +109,8 @@ func TestDeduper(t *testing.T) {
 	ctx := context.Background()
 	viewer := unique(t)
 
-	a := NewDeduper(client, 200*time.Millisecond)
-	b := NewDeduper(client, 200*time.Millisecond)
+	a := NewDeduper(client, time.Second)
+	b := NewDeduper(client, time.Second)
 	if !a.First(ctx, viewer, 1) {
 		t.Fatal("bacaan pertama dihitung")
 	}
@@ -110,7 +120,7 @@ func TestDeduper(t *testing.T) {
 	if !b.First(ctx, viewer, 2) {
 		t.Fatal("artikel lain dihitung terpisah")
 	}
-	time.Sleep(250 * time.Millisecond)
+	time.Sleep(1100 * time.Millisecond)
 	if !a.First(ctx, viewer, 1) {
 		t.Fatal("setelah window lewat, dihitung lagi")
 	}
