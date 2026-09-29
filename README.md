@@ -5,8 +5,10 @@ Backend platform artikel dan berita. Go + MySQL.
 - Akun dengan tiga role: `admin`, `author`, `reader`
 - Login JWT dengan refresh token yang dirotasi setiap dipakai
 - Artikel dengan status `draft`, `published`, `archived`, slug otomatis, kategori, dan tag
-- Pencarian, filter, pengurutan, dan paging dengan total data
-- Komentar pembaca
+- Isi artikel dalam Markdown, gambar sampul yang bisa diunggah, dan perkiraan waktu baca
+- Pencarian, filter, pengurutan (termasuk "populer"), dan paging dengan total data
+- Komentar, suka, dan bookmark pembaca, serta hitungan dibaca per hari
+- Statistik dashboard untuk penulis dan admin
 - Dokumentasi OpenAPI dengan Swagger UI di `/docs`
 
 ## Menjalankan
@@ -90,6 +92,9 @@ Semua di bawah `/api/v1`. Kolom Akses: `-` publik, `login` semua role,
 | GET, PATCH | `/me` | login | data akun sendiri, ganti nama |
 | PUT | `/me/password` | login | ganti password |
 | GET | `/me/articles` | login | artikel sendiri, semua status |
+| GET | `/me/bookmarks` | login | artikel yang disimpan |
+| GET | `/stats` | author | statistik dashboard, `?days=7..90` |
+| POST | `/uploads` | author | unggah gambar sampul (multipart, field `image`) |
 | GET | `/users` | admin | daftar user, filter `q` dan `role` |
 | GET | `/users/{id}` | admin | detail user |
 | PATCH | `/users/{id}/role` | admin | ubah role |
@@ -110,9 +115,13 @@ Semua di bawah `/api/v1`. Kolom Akses: `-` publik, `login` semua role,
 | POST | `/articles/{id}/comments` | login | berkomentar |
 | PATCH | `/comments/{id}` | penulis komentar | ubah komentar |
 | DELETE | `/comments/{id}` | penulis komentar, admin | hapus komentar |
+| PUT, DELETE | `/articles/{id}/like` | login | suka, batal suka |
+| PUT, DELETE | `/articles/{id}/bookmark` | login | simpan, batal simpan |
+| POST | `/articles/{id}/view` | - | catat artikel dibaca |
 
 Di luar `/api/v1`: `GET /health`, `GET /health/ready` (ikut mengecek database),
-`GET /docs` (Swagger UI), dan `GET /api/v1/openapi.yaml`.
+`GET /docs` (Swagger UI), `GET /api/v1/openapi.yaml`, dan `GET /uploads/{nama}`
+(gambar yang diunggah).
 
 Rincian lengkap setiap request dan response ada di `api/openapi.yaml`.
 
@@ -128,7 +137,7 @@ GET /api/v1/articles?q=golang&category=teknologi&tag=backend&author=2&sort=newes
 | `category`, `tag` | slug kategori atau tag |
 | `author` | id penulis |
 | `status` | `draft`, `published`, `archived`, atau `all`. Tanpa parameter ini hanya artikel terbit yang tampil. Selain `published`, hanya admin. |
-| `sort` | `newest` (bawaan), `oldest`, `title`, `updated` |
+| `sort` | `newest` (bawaan), `oldest`, `title`, `updated`, `popular` |
 | `page`, `per_page` | paging, `per_page` dipangkas ke `MAX_PER_PAGE` |
 
 ```json
@@ -171,9 +180,49 @@ curl -X POST http://localhost:8080/api/v1/articles \
   dirapikan menjadi huruf kecil, yang ganda dibuang, dan yang belum ada dibuat
   otomatis.
 - `status` wajib, salah satu dari `draft`, `published`, `archived`
+- `cover_image` opsional, path hasil `POST /api/v1/uploads`
+
+`content` ditulis dalam Markdown dan disimpan apa adanya; frontend yang
+merendernya. Cuplikan di daftar artikel dibersihkan dari sintaks Markdown.
 
 `PUT` mewajibkan semua field. `PATCH` hanya mengubah field yang dikirim, jadi
 menerbitkan draft cukup dengan `{"status": "published"}`.
+
+### Gambar sampul
+
+```bash
+curl -X POST http://localhost:8080/api/v1/uploads \
+  -H "Authorization: Bearer $TOKEN" \
+  -F image=@sampul.png
+# {"data":{"url":"/uploads/3f2a9c0d4e5b6a7c8d9e0f1a2b3c4d5e.png"}}
+```
+
+JPEG, PNG, WebP, atau GIF, paling besar `MAX_UPLOAD_MB` (bawaan 2 MB). Format
+dikenali dari isi berkas, bukan dari nama atau header yang dikirim klien, dan
+nama berkasnya selalu dibuat acak oleh server. Berkas disimpan di `UPLOAD_DIR`;
+di Docker folder itu memakai volume `warta_uploads`.
+
+### Suka, bookmark, dan dibaca
+
+`PUT /articles/{id}/like` dan `/bookmark` bersifat idempoten: menyukai dua kali
+tetap satu suka. Responsnya keadaan terbaru, `{"liked", "bookmarked",
+"like_count"}`. Detail artikel juga membawa `liked` dan `bookmarked` untuk
+pembaca yang login.
+
+`POST /articles/{id}/view` dipanggil halaman baca. Pembaca yang sama (akun,
+atau IP bila belum login) hanya dihitung sekali per 30 menit, dan penulis yang
+membuka artikelnya sendiri tidak dihitung. Hitungan disimpan per hari untuk
+grafik di dashboard.
+
+Urutan `popular` menimbang jumlah dibaca, suka (x5), dan komentar (x3).
+
+### Statistik
+
+`GET /api/v1/stats?days=30` mengembalikan total artikel per status, dibaca,
+suka, komentar, dan bookmark; aktivitas per hari (dibaca, komentar, artikel
+terbit) dengan hari kosong tetap diisi nol; dan lima artikel terpopuler. Admin
+melihat semua artikel ditambah jumlah akun per role, author hanya artikelnya
+sendiri. Tanggal dihitung dalam UTC.
 
 ## Aturan yang perlu diketahui
 
@@ -255,7 +304,8 @@ Migrasi `000001` adalah tabel `posts` dari versi awal project ini. Migrasi
 dipindah ke tabel `categories`, status `publish`/`thrash` menjadi
 `published`/`archived`, setiap post diberi slug, dan waktu buat serta ubah yang
 asli dipertahankan. Post lama belum punya penulis, jadi semuanya diberikan ke
-akun `arsip@warta.local` yang tidak bisa dipakai login.
+akun `arsip@warta.local` yang tidak bisa dipakai login. Migrasi `000009` dan
+`000010` menambahkan sampul, hitungan dibaca, suka, dan bookmark.
 
 Untuk membuat skema manual tanpa migrate, ada `docs/schema.sql`.
 
@@ -310,6 +360,7 @@ internal/dto         bentuk request dan response
 internal/model       struct domain
 internal/pagination  membaca page dan per_page
 internal/slug        membuat slug
+internal/storage     menyimpan dan memeriksa gambar yang diunggah
 internal/apperr      error yang membawa status HTTP
 internal/response    penulisan response JSON
 internal/logging     logger slog dengan request id
@@ -343,8 +394,12 @@ ringan. Akibatnya perubahan role atau penonaktifan akun baru terasa setelah
 access token habis (paling lama `ACCESS_TOKEN_TTL`). Karena itu umurnya dibuat
 pendek.
 
-Rate limit disimpan di memori, jadi bila service dijalankan beberapa instance,
-batasnya berlaku per instance.
+Rate limit dan pencegah hitungan dibaca ganda disimpan di memori, jadi bila
+service dijalankan beberapa instance, keduanya berlaku per instance. Gambar
+sampul disimpan di disk lokal; untuk beberapa instance, folder upload harus
+dibagi bersama (misalnya volume jaringan) atau diganti penyimpanan objek.
+
+Gambar yang diunggah tapi tidak jadi dipakai artikel tidak dihapus otomatis.
 
 Pencarian memakai `LIKE`, cukup untuk ribuan artikel. Bila datanya tumbuh jauh
 lebih besar, langkah berikutnya adalah indeks FULLTEXT atau mesin pencari

@@ -6,7 +6,10 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"image"
+	"image/png"
 	"io"
+	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -46,6 +49,8 @@ func testConfig(t *testing.T) config.Config {
 		AccessTokenTTL:  time.Minute,
 		RefreshTokenTTL: time.Hour,
 		AuthRateLimit:   1000,
+		UploadDir:       t.TempDir(),
+		MaxUploadBytes:  1 << 20,
 		DBHost:          host,
 		DBPort:          envOr("TEST_DB_PORT", "3306"),
 		DBUser:          envOr("TEST_DB_USER", "root"),
@@ -92,7 +97,7 @@ func migrate(t *testing.T, cfg config.Config, target uint) {
 	}
 }
 
-const latestVersion = 8
+const latestVersion = 10
 
 type client struct {
 	t    *testing.T
@@ -104,6 +109,30 @@ type result struct {
 	status int
 	header http.Header
 	body   []byte
+}
+
+// upload mengirim berkas sebagai multipart/form-data di field image.
+func (c client) upload(token string, data []byte) result {
+	c.t.Helper()
+
+	var body bytes.Buffer
+	form := multipart.NewWriter(&body)
+	part, err := form.CreateFormFile("image", "sampul.png")
+	if err != nil {
+		c.t.Fatal(err)
+	}
+	_, _ = part.Write(data)
+	form.Close()
+
+	req, err := http.NewRequest("POST", c.base+"/api/v1/uploads", &body)
+	if err != nil {
+		c.t.Fatal(err)
+	}
+	req.Header.Set("Content-Type", form.FormDataContentType())
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+	return c.send(req)
 }
 
 func (c client) do(method, path, token string, body any) result {
@@ -126,6 +155,11 @@ func (c client) do(method, path, token string, body any) result {
 	if token != "" {
 		req.Header.Set("Authorization", "Bearer "+token)
 	}
+	return c.send(req)
+}
+
+func (c client) send(req *http.Request) result {
+	c.t.Helper()
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -224,6 +258,36 @@ type article struct {
 	Tags         []tag      `json:"tags"`
 	CommentCount int        `json:"comment_count"`
 	PublishedAt  *time.Time `json:"published_at"`
+	CoverImage   *string    `json:"cover_image"`
+	LikeCount    int        `json:"like_count"`
+	ViewCount    int        `json:"view_count"`
+	Reading      int        `json:"reading_minutes"`
+	Liked        bool       `json:"liked"`
+	Bookmarked   bool       `json:"bookmarked"`
+}
+
+type engagement struct {
+	Liked      bool `json:"liked"`
+	Bookmarked bool `json:"bookmarked"`
+	LikeCount  int  `json:"like_count"`
+}
+
+type stats struct {
+	Scope  string `json:"scope"`
+	Totals struct {
+		Published int64 `json:"published"`
+		Views     int64 `json:"views"`
+		Likes     int64 `json:"likes"`
+		Bookmarks int64 `json:"bookmarks"`
+	} `json:"totals"`
+	Users map[string]int64 `json:"users"`
+	Daily []struct {
+		Date  string `json:"date"`
+		Views int64  `json:"views"`
+	} `json:"daily"`
+	TopArticles []struct {
+		ID int64 `json:"id"`
+	} `json:"top_articles"`
 }
 
 type comment struct {
@@ -252,7 +316,10 @@ func TestAPI(t *testing.T) {
 	migrate(t, cfg, latestVersion)
 
 	db := connect(t, cfg)
-	a := app.New(cfg, db, auth.BcryptHasher{Cost: bcrypt.MinCost})
+	a, err := app.New(cfg, db, auth.BcryptHasher{Cost: bcrypt.MinCost})
+	if err != nil {
+		t.Fatal(err)
+	}
 	if err := a.Auth.EnsureAdmin(context.Background(), "Admin", "admin@warta.test", "admin12345"); err != nil {
 		t.Fatalf("membuat admin: %v", err)
 	}
@@ -600,6 +667,99 @@ func TestAPI(t *testing.T) {
 		c.do("DELETE", commentPath, admin.AccessToken, nil).expectError(http.StatusNotFound, "not_found")
 	})
 
+	t.Run("sampul, suka, bookmark, dibaca, statistik", func(t *testing.T) {
+		c := client{t: t, base: server.URL}
+		path := fmt.Sprintf("/api/v1/articles/%d", published.ID)
+
+		var buf bytes.Buffer
+		_ = png.Encode(&buf, image.NewRGBA(image.Rect(0, 0, 4, 3)))
+
+		c.upload(reader.AccessToken, buf.Bytes()).expectError(http.StatusForbidden, "forbidden")
+		c.upload(writer.AccessToken, []byte("bukan gambar")).expectError(http.StatusUnprocessableEntity, "validation_failed")
+
+		var uploaded struct{ URL string }
+		c.upload(writer.AccessToken, buf.Bytes()).expect(http.StatusCreated, &uploaded)
+
+		res := c.do("GET", uploaded.URL, "", nil).expect(http.StatusOK, nil)
+		if res.header.Get("Content-Type") != "image/png" || !bytes.Equal(res.body, buf.Bytes()) {
+			t.Fatalf("berkas upload: %s", res.header.Get("Content-Type"))
+		}
+
+		for _, bad := range []string{"/uploads/../go.mod", "/uploads/" + strings.Repeat("a", 32) + ".png"} {
+			c.do("PATCH", path, writer.AccessToken, map[string]any{"cover_image": bad}).
+				expectError(http.StatusUnprocessableEntity, "validation_failed")
+		}
+		var withCover article
+		c.do("PATCH", path, writer.AccessToken, map[string]any{"cover_image": uploaded.URL}).expect(http.StatusOK, &withCover)
+		if withCover.CoverImage == nil || *withCover.CoverImage != uploaded.URL || withCover.Reading != 1 {
+			t.Fatalf("sampul: %+v", withCover)
+		}
+
+		c.do("PUT", path+"/like", "", nil).expectError(http.StatusUnauthorized, "unauthorized")
+		var state engagement
+		c.do("PUT", path+"/like", reader.AccessToken, nil).expect(http.StatusOK, &state)
+		c.do("PUT", path+"/like", reader.AccessToken, nil).expect(http.StatusOK, &state)
+		if !state.Liked || state.LikeCount != 1 {
+			t.Fatalf("suka dua kali tetap satu: %+v", state)
+		}
+		c.do("PUT", path+"/like", writer.AccessToken, nil).expect(http.StatusOK, &state)
+		c.do("DELETE", path+"/like", reader.AccessToken, nil).expect(http.StatusOK, &state)
+		if state.Liked || state.LikeCount != 1 {
+			t.Fatalf("batal suka: %+v", state)
+		}
+		c.do("PUT", fmt.Sprintf("/api/v1/articles/%d/like", draft.ID), admin.AccessToken, nil).
+			expectError(http.StatusForbidden, "forbidden")
+
+		c.do("PUT", path+"/bookmark", reader.AccessToken, nil).expect(http.StatusOK, &state)
+		var saved []article
+		res = c.do("GET", "/api/v1/me/bookmarks", reader.AccessToken, nil).expect(http.StatusOK, &saved)
+		if len(saved) != 1 || saved[0].ID != published.ID || res.meta().Total != 1 {
+			t.Fatalf("bookmark: %+v", saved)
+		}
+
+		var seen article
+		c.do("GET", path, reader.AccessToken, nil).expect(http.StatusOK, &seen)
+		if seen.Liked || !seen.Bookmarked || seen.LikeCount != 1 {
+			t.Fatalf("keadaan bagi pembaca: %+v", seen)
+		}
+
+		// Pengunjung anonim dihitung sekali per jendela waktu, penulis tidak dihitung.
+		c.do("POST", path+"/view", "", nil).expect(http.StatusNoContent, nil)
+		c.do("POST", path+"/view", "", nil).expect(http.StatusNoContent, nil)
+		c.do("POST", path+"/view", writer.AccessToken, nil).expect(http.StatusNoContent, nil)
+		c.do("POST", path+"/view", reader.AccessToken, nil).expect(http.StatusNoContent, nil)
+		c.do("GET", path, "", nil).expect(http.StatusOK, &seen)
+		if seen.ViewCount != 2 {
+			t.Fatalf("view_count: %d", seen.ViewCount)
+		}
+
+		var list []article
+		c.do("GET", "/api/v1/articles?sort=popular", "", nil).expect(http.StatusOK, &list)
+		if len(list) != 2 || list[0].ID != published.ID {
+			t.Fatalf("urutan populer: %+v", list)
+		}
+
+		c.do("GET", "/api/v1/stats", reader.AccessToken, nil).expectError(http.StatusForbidden, "forbidden")
+		c.do("GET", "/api/v1/stats?days=3", writer.AccessToken, nil).expectError(http.StatusBadRequest, "bad_request")
+
+		var mine stats
+		c.do("GET", "/api/v1/stats", writer.AccessToken, nil).expect(http.StatusOK, &mine)
+		if mine.Scope != "mine" || mine.Totals.Published != 2 || mine.Totals.Views != 2 ||
+			mine.Totals.Likes != 1 || mine.Totals.Bookmarks != 1 || mine.Users != nil {
+			t.Fatalf("statistik penulis: %+v", mine)
+		}
+		if len(mine.Daily) != 30 || mine.Daily[29].Views != 2 || mine.Daily[29].Date != time.Now().UTC().Format(time.DateOnly) {
+			t.Fatalf("statistik harian: %+v", mine.Daily[len(mine.Daily)-1])
+		}
+
+		var all stats
+		c.do("GET", "/api/v1/stats?days=7", admin.AccessToken, nil).expect(http.StatusOK, &all)
+		if all.Scope != "all" || all.Users["reader"] != 1 || len(all.Daily) != 7 ||
+			len(all.TopArticles) == 0 || all.TopArticles[0].ID != published.ID {
+			t.Fatalf("statistik admin: %+v", all)
+		}
+	})
+
 	t.Run("menghapus", func(t *testing.T) {
 		c := client{t: t, base: server.URL}
 
@@ -679,7 +839,10 @@ func TestLegacyPostsMigration(t *testing.T) {
 
 	migrate(t, cfg, latestVersion)
 
-	a := app.New(cfg, db, auth.BcryptHasher{Cost: bcrypt.MinCost})
+	a, err := app.New(cfg, db, auth.BcryptHasher{Cost: bcrypt.MinCost})
+	if err != nil {
+		t.Fatal(err)
+	}
 	server := httptest.NewServer(a.Handler)
 	defer server.Close()
 	c := client{t: t, base: server.URL}

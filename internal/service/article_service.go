@@ -28,16 +28,44 @@ type ArticleService interface {
 	Create(ctx context.Context, actor auth.Actor, req dto.ArticleRequest) (dto.ArticleResponse, error)
 	Update(ctx context.Context, actor auth.Actor, id int64, patch dto.ArticlePatch) (dto.ArticleResponse, error)
 	Delete(ctx context.Context, actor auth.Actor, id int64) error
+
+	// ListBookmarks menampilkan artikel terbit yang disimpan actor.
+	ListBookmarks(ctx context.Context, actor auth.Actor, q dto.ArticleQuery, p pagination.Params) ([]dto.ArticleSummary, pagination.Meta, error)
+	SetLike(ctx context.Context, actor auth.Actor, id int64, liked bool) (dto.Engagement, error)
+	SetBookmark(ctx context.Context, actor auth.Actor, id int64, bookmarked bool) (dto.Engagement, error)
+	// RecordView menambah hitungan dibaca. viewer mengenali pembaca (misalnya
+	// alamat IP) supaya muat ulang halaman tidak dihitung berkali-kali.
+	RecordView(ctx context.Context, actor auth.Actor, id int64, viewer string) error
+}
+
+// CoverChecker memastikan gambar sampul memang sudah diunggah.
+type CoverChecker interface {
+	Exists(url string) bool
 }
 
 type articleService struct {
 	articles   repository.ArticleRepository
 	categories repository.CategoryRepository
+	engagement repository.EngagementRepository
+	covers     CoverChecker
+	views      *viewDeduper
 	now        func() time.Time
 }
 
-func NewArticleService(articles repository.ArticleRepository, categories repository.CategoryRepository) ArticleService {
-	return &articleService{articles: articles, categories: categories, now: time.Now}
+func NewArticleService(
+	articles repository.ArticleRepository,
+	categories repository.CategoryRepository,
+	engagement repository.EngagementRepository,
+	covers CoverChecker,
+) ArticleService {
+	return &articleService{
+		articles:   articles,
+		categories: categories,
+		engagement: engagement,
+		covers:     covers,
+		views:      newViewDeduper(30 * time.Minute),
+		now:        time.Now,
+	}
 }
 
 var errArticleNotFound = apperr.NotFound("article tidak ditemukan")
@@ -130,7 +158,14 @@ func (s *articleService) Get(ctx context.Context, actor auth.Actor, ref string) 
 		return dto.ArticleResponse{}, apperr.Internal(err)
 	}
 
-	return dto.NewArticleResponse(article), nil
+	response := dto.NewArticleResponse(article)
+	if actor.Authenticated() {
+		response.Liked, response.Bookmarked, err = s.engagement.State(ctx, actor.ID, article.ID)
+		if err != nil {
+			return dto.ArticleResponse{}, apperr.Internal(err)
+		}
+	}
+	return response, nil
 }
 
 func (s *articleService) Create(ctx context.Context, actor auth.Actor, req dto.ArticleRequest) (dto.ArticleResponse, error) {
@@ -139,7 +174,7 @@ func (s *articleService) Create(ctx context.Context, actor auth.Actor, req dto.A
 	}
 
 	req.Normalize()
-	if err := s.validate(ctx, req, 0); err != nil {
+	if err := s.validate(ctx, req, 0, ""); err != nil {
 		return dto.ArticleResponse{}, err
 	}
 
@@ -148,6 +183,7 @@ func (s *articleService) Create(ctx context.Context, actor auth.Actor, req dto.A
 		CategoryID: req.CategoryID,
 		Title:      req.Title,
 		Content:    req.Content,
+		CoverImage: req.CoverImage,
 		Status:     model.ArticleStatus(req.Status),
 	}
 
@@ -179,10 +215,11 @@ func (s *articleService) Update(ctx context.Context, actor auth.Actor, id int64,
 		CategoryID: article.CategoryID,
 		Tags:       article.TagNames(),
 		Status:     string(article.Status),
+		CoverImage: article.CoverImage,
 	})
 	req.Normalize()
 
-	if err := s.validate(ctx, req, article.CategoryID); err != nil {
+	if err := s.validate(ctx, req, article.CategoryID, article.CoverImage); err != nil {
 		return dto.ArticleResponse{}, err
 	}
 
@@ -197,6 +234,7 @@ func (s *articleService) Update(ctx context.Context, actor auth.Actor, id int64,
 	article.Title = req.Title
 	article.Content = req.Content
 	article.CategoryID = req.CategoryID
+	article.CoverImage = req.CoverImage
 	article.Status = model.ArticleStatus(req.Status)
 	if article.IsPublished() && article.PublishedAt == nil {
 		now := s.now()
@@ -246,11 +284,15 @@ func (s *articleService) editable(ctx context.Context, actor auth.Actor, id int6
 	return article, nil
 }
 
-// validate memeriksa aturan field lalu keberadaan kategori. knownCategory
-// adalah id kategori yang sudah pasti ada sehingga tidak perlu dicek ulang.
-func (s *articleService) validate(ctx context.Context, req dto.ArticleRequest, knownCategory int64) error {
+// validate memeriksa aturan field lalu keberadaan kategori dan sampul.
+// knownCategory dan knownCover adalah nilai yang sudah tersimpan sehingga
+// tidak perlu dicek ulang.
+func (s *articleService) validate(ctx context.Context, req dto.ArticleRequest, knownCategory int64, knownCover string) error {
 	if problems := validation.ValidateArticle(req); len(problems) > 0 {
 		return apperr.Validation(problems)
+	}
+	if req.CoverImage != "" && req.CoverImage != knownCover && !s.covers.Exists(req.CoverImage) {
+		return apperr.Validation(map[string]string{"cover_image": "gambar sampul tidak ditemukan, unggah ulang"})
 	}
 	if req.CategoryID == knownCategory {
 		return nil
@@ -283,4 +325,83 @@ func writeError(err error) error {
 		return apperr.Conflict("article atau tag yang sama sedang disimpan bersamaan, coba lagi")
 	}
 	return apperr.Internal(err)
+}
+
+func (s *articleService) ListBookmarks(ctx context.Context, actor auth.Actor, q dto.ArticleQuery, p pagination.Params) ([]dto.ArticleSummary, pagination.Meta, error) {
+	filter, err := articleFilter(q)
+	if err != nil {
+		return nil, pagination.Meta{}, err
+	}
+	filter.BookmarkedBy = actor.ID
+	filter.Status = model.StatusPublished
+
+	return s.list(ctx, filter, p)
+}
+
+func (s *articleService) SetLike(ctx context.Context, actor auth.Actor, id int64, liked bool) (dto.Engagement, error) {
+	return s.engage(ctx, actor, id, func() error {
+		return s.engagement.SetLike(ctx, actor.ID, id, liked)
+	})
+}
+
+func (s *articleService) SetBookmark(ctx context.Context, actor auth.Actor, id int64, bookmarked bool) (dto.Engagement, error) {
+	return s.engage(ctx, actor, id, func() error {
+		return s.engagement.SetBookmark(ctx, actor.ID, id, bookmarked)
+	})
+}
+
+// engage menjalankan perubahan suka atau bookmark pada artikel terbit, lalu
+// mengembalikan keadaan terbarunya.
+func (s *articleService) engage(ctx context.Context, actor auth.Actor, id int64, change func() error) (dto.Engagement, error) {
+	if _, err := s.published(ctx, actor, id); err != nil {
+		return dto.Engagement{}, err
+	}
+	if err := change(); err != nil {
+		if errors.Is(err, repository.ErrMissingReference) {
+			return dto.Engagement{}, errArticleNotFound
+		}
+		return dto.Engagement{}, apperr.Internal(err)
+	}
+
+	article, err := s.articles.FindByID(ctx, id)
+	if err != nil {
+		return dto.Engagement{}, notFoundOr(err, "article tidak ditemukan")
+	}
+	liked, bookmarked, err := s.engagement.State(ctx, actor.ID, id)
+	if err != nil {
+		return dto.Engagement{}, apperr.Internal(err)
+	}
+	return dto.Engagement{Liked: liked, Bookmarked: bookmarked, LikeCount: article.LikeCount}, nil
+}
+
+func (s *articleService) RecordView(ctx context.Context, actor auth.Actor, id int64, viewer string) error {
+	article, err := s.published(ctx, actor, id)
+	if err != nil {
+		return err
+	}
+	// Penulis yang membuka artikelnya sendiri tidak dihitung.
+	if actor.ID == article.AuthorID || !s.views.first(viewer, id, s.now()) {
+		return nil
+	}
+
+	if err := s.engagement.RecordView(ctx, id, s.now().UTC()); err != nil {
+		return apperr.Internal(err)
+	}
+	return nil
+}
+
+// published memuat artikel yang boleh disukai, disimpan, dan dihitung
+// pembacanya: hanya yang sudah terbit.
+func (s *articleService) published(ctx context.Context, actor auth.Actor, id int64) (model.Article, error) {
+	article, err := s.articles.FindByID(ctx, id)
+	if errors.Is(err, repository.ErrNotFound) || err == nil && !canView(actor, article) {
+		return model.Article{}, errArticleNotFound
+	}
+	if err != nil {
+		return model.Article{}, apperr.Internal(err)
+	}
+	if !article.IsPublished() {
+		return model.Article{}, apperr.Forbidden("hanya artikel yang sudah terbit yang bisa disukai, disimpan, dan dihitung pembacanya")
+	}
+	return article, nil
 }

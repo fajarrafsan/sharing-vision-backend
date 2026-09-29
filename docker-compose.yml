@@ -36,6 +36,7 @@ services:
       DB_USER: root
       DB_PASSWORD: root
       DB_NAME: warta
+      UPLOAD_DIR: /app/uploads
       # Nilai bawaan di bawah hanya untuk mencoba di komputer sendiri. Isi
       # JWT_SECRET, ADMIN_EMAIL, dan ADMIN_PASSWORD lewat .env untuk selebihnya.
       JWT_SECRET: ${JWT_SECRET:-ganti-dengan-rahasia-acak-minimal-32-karakter}
@@ -43,6 +44,8 @@ services:
       ADMIN_EMAIL: ${ADMIN_EMAIL:-admin@warta.local}
       ADMIN_PASSWORD: ${ADMIN_PASSWORD:-admin12345}
       CORS_ORIGINS: ${CORS_ORIGINS:-*}
+    volumes:
+      - warta_uploads:/app/uploads
     # Untuk menjalankan beberapa instance sekaligus (docker compose up -d --scale api=3),
     # ganti baris di bawah menjadi rentang: "8080-8082:8080"
     ports:
@@ -55,3 +58,4 @@ services:
 
 volumes:
   warta_mysql_data:
+  warta_uploads:

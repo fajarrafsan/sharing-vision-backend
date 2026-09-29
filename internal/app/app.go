@@ -15,6 +15,7 @@ import (
 	"warta/internal/repository"
 	"warta/internal/router"
 	"warta/internal/service"
+	"warta/internal/storage"
 )
 
 const maxBodyBytes = 1 << 20
@@ -28,7 +29,12 @@ type App struct {
 	refreshTokens repository.RefreshTokenRepository
 }
 
-func New(cfg config.Config, db *sql.DB, hasher auth.PasswordHasher) *App {
+func New(cfg config.Config, db *sql.DB, hasher auth.PasswordHasher) (*App, error) {
+	uploads, err := storage.NewLocal(cfg.UploadDir, cfg.MaxUploadBytes)
+	if err != nil {
+		return nil, err
+	}
+
 	pages := pagination.Parser{DefaultPerPage: cfg.DefaultPerPage, MaxPerPage: cfg.MaxPerPage}
 	tokens := auth.NewTokenManager(cfg.JWTSecret, cfg.JWTIssuer, cfg.AccessTokenTTL)
 
@@ -38,6 +44,7 @@ func New(cfg config.Config, db *sql.DB, hasher auth.PasswordHasher) *App {
 	tags := repository.NewTagRepository(db)
 	articles := repository.NewArticleRepository(db)
 	comments := repository.NewCommentRepository(db)
+	engagement := repository.NewEngagementRepository(db)
 
 	authService := service.NewAuthService(users, refreshTokens, hasher, tokens, cfg.RefreshTokenTTL)
 
@@ -48,20 +55,23 @@ func New(cfg config.Config, db *sql.DB, hasher auth.PasswordHasher) *App {
 		Users:      handler.NewUserHandler(service.NewUserService(users), pages),
 		Categories: handler.NewCategoryHandler(service.NewCategoryService(categories)),
 		Tags:       handler.NewTagHandler(service.NewTagService(tags), pages),
-		Articles:   handler.NewArticleHandler(service.NewArticleService(articles, categories), pages),
+		Articles:   handler.NewArticleHandler(service.NewArticleService(articles, categories, engagement, uploads), pages),
 		Comments:   handler.NewCommentHandler(service.NewCommentService(comments, articles), pages),
+		Stats:      handler.NewStatsHandler(service.NewStatsService(repository.NewStatsRepository(db))),
+		Uploads:    handler.NewUploadHandler(uploads),
 	}
 
 	return &App{
 		Handler: router.New(handlers, router.Options{
-			Tokens:       tokens,
-			CORSOrigins:  cfg.CORSOrigins,
-			AuthLimiter:  middleware.NewRateLimiter(cfg.AuthRateLimit),
-			MaxBodyBytes: maxBodyBytes,
+			Tokens:         tokens,
+			CORSOrigins:    cfg.CORSOrigins,
+			AuthLimiter:    middleware.NewRateLimiter(cfg.AuthRateLimit),
+			MaxBodyBytes:   maxBodyBytes,
+			MaxUploadBytes: cfg.MaxUploadBytes + 64<<10,
 		}),
 		Auth:          authService,
 		refreshTokens: refreshTokens,
-	}
+	}, nil
 }
 
 // CleanupTokens menghapus refresh token kedaluwarsa secara berkala sampai ctx

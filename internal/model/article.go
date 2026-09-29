@@ -37,13 +37,28 @@ type Article struct {
 	CategorySlug string
 	Tags         []Tag
 	CommentCount int
-	PublishedAt  *time.Time
-	CreatedAt    time.Time
-	UpdatedAt    time.Time
+	// CoverImage adalah path gambar sampul, misalnya /uploads/ab12....webp.
+	// Kosong berarti tanpa sampul.
+	CoverImage string
+	ViewCount  int
+	LikeCount  int
+	// ContentLength adalah panjang isi dalam karakter, dasar perkiraan waktu baca.
+	ContentLength int
+	PublishedAt   *time.Time
+	CreatedAt     time.Time
+	UpdatedAt     time.Time
 }
 
 func (a Article) IsPublished() bool {
 	return a.Status == StatusPublished
+}
+
+// charsPerMinute kira-kira 200 kata per menit untuk teks berbahasa Indonesia.
+const charsPerMinute = 1200
+
+// ReadingMinutes memperkirakan lama membaca, paling sedikit satu menit.
+func (a Article) ReadingMinutes() int {
+	return max(1, (a.ContentLength+charsPerMinute-1)/charsPerMinute)
 }
 
 func (a Article) TagNames() []string {
@@ -54,10 +69,10 @@ func (a Article) TagNames() []string {
 	return names
 }
 
-// Excerpt meringkas teks menjadi paling banyak n karakter, dipotong di batas
-// kata supaya tidak berhenti di tengah kata.
-func Excerpt(text string, n int) string {
-	text = strings.Join(strings.Fields(text), " ")
+// Excerpt meringkas isi Markdown menjadi teks biasa paling banyak n karakter,
+// dipotong di batas kata supaya tidak berhenti di tengah kata.
+func Excerpt(markdown string, n int) string {
+	text := strings.Join(strings.Fields(PlainText(markdown)), " ")
 
 	runes := []rune(text)
 	if len(runes) <= n {

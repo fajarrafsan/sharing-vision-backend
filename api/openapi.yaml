@@ -45,6 +45,8 @@ tags:
     description: Tulisan dengan status draft, published, atau archived
   - name: Komentar
     description: Komentar pembaca pada artikel yang sudah terbit
+  - name: Interaksi
+    description: Suka, bookmark, hitungan dibaca, dan upload gambar sampul
   - name: Health
     description: Pemeriksaan untuk orkestrator dan load balancer
 
@@ -226,6 +228,83 @@ paths:
               schema: { $ref: "#/components/schemas/ArticleListEnvelope" }
         "400": { $ref: "#/components/responses/BadRequest" }
         "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /api/v1/me/bookmarks:
+    get:
+      tags: [Akun]
+      operationId: listMyBookmarks
+      summary: Artikel yang disimpan
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - $ref: "#/components/parameters/Page"
+        - $ref: "#/components/parameters/PerPage"
+        - $ref: "#/components/parameters/Search"
+        - $ref: "#/components/parameters/Sort"
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ArticleListEnvelope" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+  /api/v1/stats:
+    get:
+      tags: [Akun]
+      operationId: getStats
+      summary: Statistik dashboard (author dan admin)
+      description: Admin melihat semua artikel, author hanya artikelnya sendiri.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - name: days
+          in: query
+          schema: { type: integer, minimum: 7, maximum: 90, default: 30 }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: "#/components/schemas/Stats" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /api/v1/uploads:
+    post:
+      tags: [Interaksi]
+      operationId: uploadImage
+      summary: Mengunggah gambar sampul (author dan admin)
+      description: |
+        JPEG, PNG, WebP, atau GIF, paling besar `MAX_UPLOAD_MB` (bawaan 2 MB).
+        Format dikenali dari isi berkas, bukan dari nama atau header. Pakai
+        `url` hasilnya sebagai `cover_image` artikel.
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [image]
+              properties:
+                image: { type: string, format: binary }
+      responses:
+        "201":
+          description: Tersimpan
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: object
+                    properties:
+                      url: { type: string, example: /uploads/3f2a9c0d4e5b6a7c8d9e0f1a2b3c4d5e.png }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "413": { $ref: "#/components/responses/PayloadTooLarge" }
+        "422": { $ref: "#/components/responses/ValidationFailed" }
 
   /api/v1/users:
     get:
@@ -601,6 +680,92 @@ paths:
         "403": { $ref: "#/components/responses/Forbidden" }
         "404": { $ref: "#/components/responses/NotFound" }
 
+  /api/v1/articles/{id}/like:
+    put:
+      tags: [Interaksi]
+      operationId: likeArticle
+      summary: Menyukai artikel terbit (idempoten)
+      security: [{ bearerAuth: [] }]
+      parameters: [{ $ref: "#/components/parameters/Id" }]
+      responses:
+        "200":
+          description: Keadaan terbaru
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: "#/components/schemas/Engagement" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    delete:
+      tags: [Interaksi]
+      operationId: unlikeArticle
+      summary: Membatalkan suka
+      security: [{ bearerAuth: [] }]
+      parameters: [{ $ref: "#/components/parameters/Id" }]
+      responses:
+        "200":
+          description: Keadaan terbaru
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: "#/components/schemas/Engagement" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /api/v1/articles/{id}/bookmark:
+    put:
+      tags: [Interaksi]
+      operationId: bookmarkArticle
+      summary: Menyimpan artikel terbit (idempoten)
+      security: [{ bearerAuth: [] }]
+      parameters: [{ $ref: "#/components/parameters/Id" }]
+      responses:
+        "200":
+          description: Keadaan terbaru
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: "#/components/schemas/Engagement" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    delete:
+      tags: [Interaksi]
+      operationId: unbookmarkArticle
+      summary: Menghapus dari simpanan
+      security: [{ bearerAuth: [] }]
+      parameters: [{ $ref: "#/components/parameters/Id" }]
+      responses:
+        "200":
+          description: Keadaan terbaru
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: "#/components/schemas/Engagement" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /api/v1/articles/{id}/view:
+    post:
+      tags: [Interaksi]
+      operationId: recordArticleView
+      summary: Mencatat artikel dibaca
+      description: |
+        Dipanggil halaman baca. Pembaca yang sama (akun, atau IP bila belum
+        login) dihitung sekali per 30 menit, dan penulis yang membuka
+        artikelnya sendiri tidak dihitung.
+      parameters: [{ $ref: "#/components/parameters/Id" }]
+      responses:
+        "204": { description: Tercatat atau diabaikan sebagai hitungan ganda }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
   /api/v1/articles/{id}/comments:
     get:
       operationId: listComments
@@ -725,7 +890,8 @@ components:
     Sort:
       name: sort
       in: query
-      schema: { type: string, enum: [newest, oldest, title, updated], default: newest }
+      description: popular menimbang jumlah dibaca, suka (x5), dan komentar (x3)
+      schema: { type: string, enum: [newest, oldest, title, updated, popular], default: newest }
 
   responses:
     BadRequest:
@@ -885,7 +1051,14 @@ components:
         tags:
           type: array
           items: { $ref: "#/components/schemas/TagRef" }
+        cover_image:
+          type: string
+          nullable: true
+          description: Path gambar sampul, misalnya /uploads/3f2a....webp
         comment_count: { type: integer }
+        like_count: { type: integer }
+        view_count: { type: integer }
+        reading_minutes: { type: integer, description: Perkiraan lama membaca }
         published_at:
           type: string
           format: date-time
@@ -898,7 +1071,56 @@ components:
         - $ref: "#/components/schemas/ArticleSummary"
         - type: object
           properties:
-            content: { type: string }
+            content: { type: string, description: Isi dalam format Markdown }
+            liked: { type: boolean, description: Selalu false bila belum login }
+            bookmarked: { type: boolean, description: Selalu false bila belum login }
+    Engagement:
+      type: object
+      properties:
+        liked: { type: boolean }
+        bookmarked: { type: boolean }
+        like_count: { type: integer }
+    Stats:
+      type: object
+      properties:
+        scope: { type: string, enum: [all, mine], description: "all untuk admin, mine untuk author" }
+        days: { type: integer }
+        totals:
+          type: object
+          properties:
+            articles: { type: integer }
+            published: { type: integer }
+            draft: { type: integer }
+            archived: { type: integer }
+            views: { type: integer }
+            likes: { type: integer }
+            comments: { type: integer }
+            bookmarks: { type: integer }
+        users:
+          type: object
+          description: Jumlah akun per role, hanya untuk admin
+          additionalProperties: { type: integer }
+        daily:
+          type: array
+          description: Satu baris per hari (UTC), termasuk hari tanpa aktivitas
+          items:
+            type: object
+            properties:
+              date: { type: string, format: date }
+              views: { type: integer }
+              comments: { type: integer }
+              published: { type: integer }
+        top_articles:
+          type: array
+          items:
+            type: object
+            properties:
+              id: { type: integer, format: int64 }
+              title: { type: string }
+              slug: { type: string }
+              views: { type: integer }
+              likes: { type: integer }
+              comments: { type: integer }
     Comment:
       type: object
       properties:
@@ -959,8 +1181,11 @@ components:
       required: [title, content, category_id, status]
       properties:
         title: { type: string, minLength: 20, maxLength: 200 }
-        content: { type: string, minLength: 200, maxLength: 100000 }
+        content: { type: string, minLength: 200, maxLength: 100000, description: Markdown }
         category_id: { type: integer, format: int64 }
+        cover_image:
+          type: string
+          description: Path hasil POST /api/v1/uploads. Kosong berarti tanpa sampul.
         tags:
           type: array
           maxItems: 10
@@ -986,6 +1211,7 @@ components:
           type: array
           items: { type: string }
         status: { $ref: "#/components/schemas/ArticleStatus" }
+        cover_image: { type: string }
     CommentRequest:
       type: object
       required: [body]

@@ -14,6 +14,12 @@ const (
 	SortOldest  = "oldest"
 	SortTitle   = "title"
 	SortUpdated = "updated"
+	SortPopular = "popular"
+)
+
+const (
+	likeCountSQL    = "(SELECT COUNT(*) FROM article_likes al WHERE al.article_id = a.id)"
+	commentCountSQL = "(SELECT COUNT(*) FROM comments cm WHERE cm.article_id = a.id)"
 )
 
 var articleOrder = map[string]string{
@@ -21,6 +27,8 @@ var articleOrder = map[string]string{
 	SortOldest:  "COALESCE(a.published_at, a.created_at) ASC, a.id ASC",
 	SortTitle:   "a.title ASC, a.id ASC",
 	SortUpdated: "a.updated_at DESC, a.id DESC",
+	// Populer: satu suka setara lima kali dibaca, satu komentar tiga kali.
+	SortPopular: "(a.view_count + 5 * " + likeCountSQL + " + 3 * " + commentCountSQL + ") DESC, a.id DESC",
 }
 
 func ValidSort(sort string) bool {
@@ -33,6 +41,8 @@ type ArticleFilter struct {
 	CategorySlug string
 	TagSlug      string
 	AuthorID     int64
+	// BookmarkedBy membatasi pada artikel yang disimpan user ini.
+	BookmarkedBy int64
 	// Status kosong berarti semua status.
 	Status model.ArticleStatus
 	Sort   string
@@ -62,7 +72,7 @@ func NewArticleRepository(db *sql.DB) ArticleRepository {
 // excerptSource cukup panjang untuk cuplikan tanpa membaca seluruh isi article
 // di halaman daftar.
 const (
-	excerptSource = 400
+	excerptSource = 600
 	excerptLength = 200
 )
 
@@ -73,29 +83,31 @@ JOIN categories c ON c.id = a.category_id`
 
 func articleSelect(contentColumn string) string {
 	return `
-SELECT a.id, a.title, a.slug, ` + contentColumn + `, a.status,
+SELECT a.id, a.title, a.slug, ` + contentColumn + `, CHAR_LENGTH(a.content), a.cover_image, a.status,
        a.author_id, u.name, a.category_id, c.name, c.slug,
-       (SELECT COUNT(*) FROM comments cm WHERE cm.article_id = a.id),
+       ` + commentCountSQL + `, ` + likeCountSQL + `, a.view_count,
        a.published_at, a.created_at, a.updated_at` + articleFrom
 }
 
 func scanArticle(row interface{ Scan(...any) error }, a *model.Article, content *string) error {
 	var publishedAt sql.NullTime
+	var cover sql.NullString
 	err := row.Scan(
-		&a.ID, &a.Title, &a.Slug, content, &a.Status,
+		&a.ID, &a.Title, &a.Slug, content, &a.ContentLength, &cover, &a.Status,
 		&a.AuthorID, &a.AuthorName, &a.CategoryID, &a.CategoryName, &a.CategorySlug,
-		&a.CommentCount, &publishedAt, &a.CreatedAt, &a.UpdatedAt,
+		&a.CommentCount, &a.LikeCount, &a.ViewCount, &publishedAt, &a.CreatedAt, &a.UpdatedAt,
 	)
 	a.PublishedAt = nullTimePtr(publishedAt)
+	a.CoverImage = cover.String
 	return err
 }
 
 func (r *articleRepository) Create(ctx context.Context, a *model.Article, tags []string) error {
 	return withTx(ctx, r.db, func(tx *sql.Tx) error {
 		result, err := tx.ExecContext(ctx, `
-			INSERT INTO articles (author_id, category_id, title, slug, content, status, published_at)
-			VALUES (?, ?, ?, ?, ?, ?, ?)`,
-			a.AuthorID, a.CategoryID, a.Title, a.Slug, a.Content, a.Status, a.PublishedAt)
+			INSERT INTO articles (author_id, category_id, title, slug, content, cover_image, status, published_at)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+			a.AuthorID, a.CategoryID, a.Title, a.Slug, a.Content, nullString(a.CoverImage), a.Status, a.PublishedAt)
 		if err != nil {
 			return mapError(err)
 		}
@@ -113,9 +125,9 @@ func (r *articleRepository) Update(ctx context.Context, a *model.Article, tags *
 	return withTx(ctx, r.db, func(tx *sql.Tx) error {
 		_, err := tx.ExecContext(ctx, `
 			UPDATE articles
-			SET category_id = ?, title = ?, slug = ?, content = ?, status = ?, published_at = ?
+			SET category_id = ?, title = ?, slug = ?, content = ?, cover_image = ?, status = ?, published_at = ?
 			WHERE id = ?`,
-			a.CategoryID, a.Title, a.Slug, a.Content, a.Status, a.PublishedAt, a.ID)
+			a.CategoryID, a.Title, a.Slug, a.Content, nullString(a.CoverImage), a.Status, a.PublishedAt, a.ID)
 		if err != nil {
 			return mapError(err)
 		}
@@ -205,6 +217,10 @@ func (r *articleRepository) List(ctx context.Context, f ArticleFilter, p paginat
 	if f.AuthorID > 0 {
 		conditions = append(conditions, "a.author_id = ?")
 		args = append(args, f.AuthorID)
+	}
+	if f.BookmarkedBy > 0 {
+		conditions = append(conditions, "EXISTS (SELECT 1 FROM bookmarks b WHERE b.article_id = a.id AND b.user_id = ?)")
+		args = append(args, f.BookmarkedBy)
 	}
 	if f.CategorySlug != "" {
 		conditions = append(conditions, "c.slug = ?")

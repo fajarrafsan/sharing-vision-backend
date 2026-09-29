@@ -14,12 +14,18 @@ RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /out/warta-m
 
 FROM alpine:3.20
 
-RUN apk add --no-cache ca-certificates tzdata && adduser -D -u 10001 app
+RUN apk add --no-cache ca-certificates tzdata && adduser -D -u 10001 app \
+    && mkdir -p /app/uploads && chown app:app /app/uploads
+
+WORKDIR /app
 
 COPY --from=build /out/warta-api /usr/local/bin/warta-api
 COPY --from=build /out/warta-migrate /usr/local/bin/warta-migrate
 
 USER app
+# Gambar sampul yang diunggah. Pasang volume di sini supaya tidak hilang saat
+# container diganti.
+VOLUME /app/uploads
 EXPOSE 8080
 
 ENTRYPOINT ["warta-api"]

@@ -53,7 +53,10 @@ func run() error {
 	}
 	defer db.Close()
 
-	a := app.New(cfg, db, auth.BcryptHasher{Cost: bcrypt.DefaultCost})
+	a, err := app.New(cfg, db, auth.BcryptHasher{Cost: bcrypt.DefaultCost})
+	if err != nil {
+		return errors.Join(errors.New("gagal menyiapkan folder upload"), err)
+	}
 
 	if cfg.AdminEmail != "" {
 		if err := a.Auth.EnsureAdmin(ctx, cfg.AdminName, cfg.AdminEmail, cfg.AdminPassword); err != nil {

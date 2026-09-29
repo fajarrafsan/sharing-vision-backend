@@ -21,3 +21,23 @@ func TestExcerpt(t *testing.T) {
 		}
 	}
 }
+
+func TestPlainText(t *testing.T) {
+	markdown := "# Judul Besar\n\nParagraf dengan **tebal**, _miring_, dan `kode`.\n\n" +
+		"- butir [tautan](https://warta.id)\n1. nomor ![gambar](/uploads/a.png)\n> kutipan\n\n" +
+		"```go\nfmt.Println(\"abaikan\")\n```\n---\nPenutup ~~coret~~."
+
+	got := Excerpt(markdown, 500)
+	want := "Judul Besar Paragraf dengan tebal, _miring_, dan kode. butir tautan nomor gambar kutipan Penutup coret."
+	if got != want {
+		t.Fatalf("Excerpt markdown:\n got %q\nwant %q", got, want)
+	}
+}
+
+func TestReadingMinutes(t *testing.T) {
+	for length, want := range map[int]int{0: 1, 1200: 1, 1201: 2, 6000: 5} {
+		if got := (Article{ContentLength: length}).ReadingMinutes(); got != want {
+			t.Errorf("ContentLength %d: %d menit, ingin %d", length, got, want)
+		}
+	}
+}

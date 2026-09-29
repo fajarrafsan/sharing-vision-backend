@@ -2,10 +2,14 @@ package validation
 
 import (
 	"fmt"
+	"regexp"
 
 	"warta/internal/dto"
 	"warta/internal/model"
 )
+
+// coverPattern sama dengan nama berkas buatan storage.Local.
+var coverPattern = regexp.MustCompile(`^/uploads/[a-f0-9]{32}\.(jpg|png|webp|gif)$`)
 
 const (
 	maxTags        = 10
@@ -47,6 +51,10 @@ func ValidateArticle(r dto.ArticleRequest) map[string]string {
 			problems["tags"] = msg
 			break
 		}
+	}
+
+	if r.CoverImage != "" && !coverPattern.MatchString(r.CoverImage) {
+		problems["cover_image"] = "cover_image harus berupa path hasil upload"
 	}
 
 	switch {

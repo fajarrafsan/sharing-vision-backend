@@ -96,6 +96,10 @@ func placeholders(n int) string {
 	return strings.TrimSuffix(strings.Repeat("?, ", n), ", ")
 }
 
+func nullString(s string) sql.NullString {
+	return sql.NullString{String: s, Valid: s != ""}
+}
+
 func nullTimePtr(t sql.NullTime) *time.Time {
 	if !t.Valid {
 		return nil

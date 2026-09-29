@@ -20,6 +20,8 @@ type Handlers struct {
 	Tags       *handler.TagHandler
 	Articles   *handler.ArticleHandler
 	Comments   *handler.CommentHandler
+	Stats      *handler.StatsHandler
+	Uploads    *handler.UploadHandler
 }
 
 type Options struct {
@@ -27,6 +29,9 @@ type Options struct {
 	CORSOrigins  []string
 	AuthLimiter  *middleware.RateLimiter
 	MaxBodyBytes int64
+	// MaxUploadBytes adalah batas body untuk upload gambar, sedikit di atas
+	// batas berkasnya untuk memberi ruang bagi header multipart.
+	MaxUploadBytes int64
 }
 
 func New(h Handlers, opt Options) http.Handler {
@@ -39,8 +44,12 @@ func New(h Handlers, opt Options) http.Handler {
 		limited  = middleware.RateLimit(opt.AuthLimiter)
 	)
 
+	// Setiap rute membatasi ukuran body. Rute upload memakai batasnya sendiri.
+	routeWithLimit := func(limit int64, pattern string, fn http.HandlerFunc, mws ...middleware.Middleware) {
+		mux.Handle(pattern, middleware.Chain(fn, append([]middleware.Middleware{middleware.MaxBody(limit)}, mws...)...))
+	}
 	route := func(pattern string, fn http.HandlerFunc, mws ...middleware.Middleware) {
-		mux.Handle(pattern, middleware.Chain(fn, mws...))
+		routeWithLimit(opt.MaxBodyBytes, pattern, fn, mws...)
 	}
 
 	route("GET /health", h.Health.Live)
@@ -58,6 +67,11 @@ func New(h Handlers, opt Options) http.Handler {
 	route("PATCH /api/v1/me", h.Auth.UpdateMe, signedIn)
 	route("PUT /api/v1/me/password", h.Auth.ChangePassword, signedIn)
 	route("GET /api/v1/me/articles", h.Articles.ListMine, signedIn)
+	route("GET /api/v1/me/bookmarks", h.Articles.ListBookmarks, signedIn)
+	route("GET /api/v1/stats", h.Stats.Overview, signedIn, writer)
+
+	routeWithLimit(opt.MaxUploadBytes, "POST /api/v1/uploads", h.Uploads.Create, signedIn, writer)
+	route("GET /uploads/{name}", h.Uploads.Serve)
 
 	route("GET /api/v1/users", h.Users.List, signedIn, admin)
 	route("GET /api/v1/users/{id}", h.Users.Get, signedIn, admin)
@@ -81,6 +95,12 @@ func New(h Handlers, opt Options) http.Handler {
 	route("PATCH /api/v1/articles/{id}", h.Articles.Patch, signedIn)
 	route("DELETE /api/v1/articles/{id}", h.Articles.Delete, signedIn)
 
+	route("PUT /api/v1/articles/{id}/like", h.Articles.SetLike, signedIn)
+	route("DELETE /api/v1/articles/{id}/like", h.Articles.SetLike, signedIn)
+	route("PUT /api/v1/articles/{id}/bookmark", h.Articles.SetBookmark, signedIn)
+	route("DELETE /api/v1/articles/{id}/bookmark", h.Articles.SetBookmark, signedIn)
+	route("POST /api/v1/articles/{id}/view", h.Articles.RecordView)
+
 	route("GET /api/v1/articles/{id}/comments", h.Comments.List)
 	route("POST /api/v1/articles/{id}/comments", h.Comments.Create, signedIn)
 	route("PATCH /api/v1/comments/{id}", h.Comments.Update, signedIn)
@@ -92,7 +112,6 @@ func New(h Handlers, opt Options) http.Handler {
 		middleware.Recover,
 		middleware.SecurityHeaders,
 		middleware.CORS(opt.CORSOrigins),
-		middleware.MaxBody(opt.MaxBodyBytes),
 		middleware.Authenticate(opt.Tokens),
 	)
 }

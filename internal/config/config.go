@@ -32,6 +32,10 @@ type Config struct {
 	// register, login, dan refresh.
 	AuthRateLimit int
 
+	// UploadDir adalah folder gambar sampul yang diunggah.
+	UploadDir      string
+	MaxUploadBytes int64
+
 	AdminName     string
 	AdminEmail    string
 	AdminPassword string
@@ -65,6 +69,9 @@ func Load() (Config, error) {
 		RefreshTokenTTL: l.duration("REFRESH_TOKEN_TTL", 7*24*time.Hour),
 		AuthRateLimit:   l.integer("AUTH_RATE_LIMIT", 20),
 
+		UploadDir:      l.str("UPLOAD_DIR", "uploads"),
+		MaxUploadBytes: int64(l.integer("MAX_UPLOAD_MB", 2)) << 20,
+
 		AdminName:     l.str("ADMIN_NAME", "Administrator"),
 		AdminEmail:    strings.ToLower(l.str("ADMIN_EMAIL", "")),
 		AdminPassword: l.str("ADMIN_PASSWORD", ""),
@@ -81,6 +88,9 @@ func Load() (Config, error) {
 	}
 	if cfg.DefaultPerPage < 1 || cfg.MaxPerPage < cfg.DefaultPerPage {
 		l.fail("DEFAULT_PER_PAGE minimal 1 dan tidak boleh melebihi MAX_PER_PAGE")
+	}
+	if cfg.MaxUploadBytes < 1<<20 || cfg.MaxUploadBytes > 20<<20 {
+		l.fail("MAX_UPLOAD_MB harus antara 1 dan 20")
 	}
 	if cfg.AuthRateLimit < 1 {
 		l.fail("AUTH_RATE_LIMIT minimal 1")

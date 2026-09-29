@@ -14,11 +14,14 @@ type ArticleRequest struct {
 	CategoryID int64    `json:"category_id"`
 	Tags       []string `json:"tags"`
 	Status     string   `json:"status"`
+	// CoverImage adalah path hasil POST /api/v1/uploads. Kosong berarti tanpa sampul.
+	CoverImage string `json:"cover_image"`
 }
 
 func (r *ArticleRequest) Normalize() {
 	r.Title = collapseSpaces(r.Title)
 	r.Content = strings.TrimSpace(r.Content)
+	r.CoverImage = strings.TrimSpace(r.CoverImage)
 	r.Status = strings.ToLower(strings.TrimSpace(r.Status))
 
 	seen := make(map[string]bool, len(r.Tags))
@@ -47,6 +50,7 @@ func (r ArticleRequest) AsPatch() ArticlePatch {
 		CategoryID: &r.CategoryID,
 		Tags:       &tags,
 		Status:     &r.Status,
+		CoverImage: &r.CoverImage,
 	}
 }
 
@@ -57,6 +61,7 @@ type ArticlePatch struct {
 	CategoryID *int64    `json:"category_id"`
 	Tags       *[]string `json:"tags"`
 	Status     *string   `json:"status"`
+	CoverImage *string   `json:"cover_image"`
 }
 
 // Apply menimpa base dengan field yang dikirim. Hasilnya request lengkap yang
@@ -77,6 +82,9 @@ func (p ArticlePatch) Apply(base ArticleRequest) ArticleRequest {
 	if p.Status != nil {
 		base.Status = *p.Status
 	}
+	if p.CoverImage != nil {
+		base.CoverImage = *p.CoverImage
+	}
 	return base
 }
 
@@ -89,25 +97,39 @@ type ArticleQuery struct {
 	Sort     string
 }
 
+// Engagement adalah keadaan suka dan bookmark satu artikel bagi pembaca.
+type Engagement struct {
+	Liked      bool `json:"liked"`
+	Bookmarked bool `json:"bookmarked"`
+	LikeCount  int  `json:"like_count"`
+}
+
 // ArticleSummary dipakai di daftar article: isi lengkap diganti cuplikan.
 type ArticleSummary struct {
-	ID           int64          `json:"id"`
-	Title        string         `json:"title"`
-	Slug         string         `json:"slug"`
-	Excerpt      string         `json:"excerpt"`
-	Status       string         `json:"status"`
-	Author       AuthorResponse `json:"author"`
-	Category     CategoryRef    `json:"category"`
-	Tags         []TagRef       `json:"tags"`
-	CommentCount int            `json:"comment_count"`
-	PublishedAt  *time.Time     `json:"published_at"`
-	CreatedAt    time.Time      `json:"created_at"`
-	UpdatedAt    time.Time      `json:"updated_at"`
+	ID             int64          `json:"id"`
+	Title          string         `json:"title"`
+	Slug           string         `json:"slug"`
+	Excerpt        string         `json:"excerpt"`
+	Status         string         `json:"status"`
+	Author         AuthorResponse `json:"author"`
+	Category       CategoryRef    `json:"category"`
+	Tags           []TagRef       `json:"tags"`
+	CoverImage     *string        `json:"cover_image"`
+	CommentCount   int            `json:"comment_count"`
+	LikeCount      int            `json:"like_count"`
+	ViewCount      int            `json:"view_count"`
+	ReadingMinutes int            `json:"reading_minutes"`
+	PublishedAt    *time.Time     `json:"published_at"`
+	CreatedAt      time.Time      `json:"created_at"`
+	UpdatedAt      time.Time      `json:"updated_at"`
 }
 
 type ArticleResponse struct {
 	ArticleSummary
 	Content string `json:"content"`
+	// Liked dan Bookmarked selalu false bagi pengunjung yang belum login.
+	Liked      bool `json:"liked"`
+	Bookmarked bool `json:"bookmarked"`
 }
 
 func NewArticleSummary(a model.Article) ArticleSummary {
@@ -116,19 +138,28 @@ func NewArticleSummary(a model.Article) ArticleSummary {
 		tags = append(tags, TagRef{ID: t.ID, Name: t.Name, Slug: t.Slug})
 	}
 
+	var cover *string
+	if a.CoverImage != "" {
+		cover = &a.CoverImage
+	}
+
 	return ArticleSummary{
-		ID:           a.ID,
-		Title:        a.Title,
-		Slug:         a.Slug,
-		Excerpt:      a.Excerpt,
-		Status:       string(a.Status),
-		Author:       AuthorResponse{ID: a.AuthorID, Name: a.AuthorName},
-		Category:     CategoryRef{ID: a.CategoryID, Name: a.CategoryName, Slug: a.CategorySlug},
-		Tags:         tags,
-		CommentCount: a.CommentCount,
-		PublishedAt:  a.PublishedAt,
-		CreatedAt:    a.CreatedAt,
-		UpdatedAt:    a.UpdatedAt,
+		ID:             a.ID,
+		Title:          a.Title,
+		Slug:           a.Slug,
+		Excerpt:        a.Excerpt,
+		Status:         string(a.Status),
+		Author:         AuthorResponse{ID: a.AuthorID, Name: a.AuthorName},
+		Category:       CategoryRef{ID: a.CategoryID, Name: a.CategoryName, Slug: a.CategorySlug},
+		Tags:           tags,
+		CoverImage:     cover,
+		CommentCount:   a.CommentCount,
+		LikeCount:      a.LikeCount,
+		ViewCount:      a.ViewCount,
+		ReadingMinutes: a.ReadingMinutes(),
+		PublishedAt:    a.PublishedAt,
+		CreatedAt:      a.CreatedAt,
+		UpdatedAt:      a.UpdatedAt,
 	}
 }
 
