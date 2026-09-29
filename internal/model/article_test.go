@@ -28,7 +28,7 @@ func TestPlainText(t *testing.T) {
 		"```go\nfmt.Println(\"abaikan\")\n```\n---\nPenutup ~~coret~~."
 
 	got := Excerpt(markdown, 500)
-	want := "Judul Besar Paragraf dengan tebal, _miring_, dan kode. butir tautan nomor gambar kutipan Penutup coret."
+	want := "Judul Besar. Paragraf dengan tebal, _miring_, dan kode. butir tautan nomor gambar kutipan Penutup coret."
 	if got != want {
 		t.Fatalf("Excerpt markdown:\n got %q\nwant %q", got, want)
 	}

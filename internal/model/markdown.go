@@ -11,6 +11,7 @@ var (
 	mdBlock    = regexp.MustCompile(`^\s{0,3}(#{1,6}\s+|>\s?|[-*+]\s+|\d+[.)]\s+)`)
 	mdEmphasis = regexp.MustCompile("(\\*\\*|__|~~|\\*|`)")
 	mdRule     = regexp.MustCompile(`^\s{0,3}([-*_]\s*){3,}$`)
+	mdHeading  = regexp.MustCompile(`^\s{0,3}#{1,6}\s+`)
 )
 
 // PlainText membuang sintaks Markdown yang umum (judul, kutipan, daftar,
@@ -30,10 +31,16 @@ func PlainText(markdown string) string {
 			continue
 		}
 
+		heading := mdHeading.MatchString(line)
 		line = mdBlock.ReplaceAllString(line, "")
 		line = mdImage.ReplaceAllString(line, "$1")
 		line = mdLink.ReplaceAllString(line, "$1")
 		line = mdEmphasis.ReplaceAllString(line, "")
+		// Subjudul diberi titik supaya tidak menyambung ke kalimat berikutnya
+		// di cuplikan.
+		if heading && !strings.ContainsAny(line[max(0, len(line)-1):], ".!?:") {
+			line = strings.TrimRight(line, " ") + "."
+		}
 		out = append(out, line)
 	}
 
