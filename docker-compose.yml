@@ -24,6 +24,7 @@ services:
   # (docker-compose.prod.yml sudah menyertakan Redis).
   api:
     build: .
+    image: ${API_IMAGE:-warta-api}
     restart: unless-stopped
     depends_on:
       mysql:

@@ -1,0 +1,35 @@
+# Reverse proxy di depan API untuk docker-compose.prod.yml.
+#
+# Caddy meminta dan memperbarui sertifikat HTTPS dari Let's Encrypt secara
+# otomatis untuk API_DOMAIN, dan mengalihkan HTTP ke HTTPS. Syaratnya DNS
+# API_DOMAIN sudah mengarah ke server ini dan port 80 serta 443 terbuka.
+{
+	email {$ACME_EMAIL}
+}
+
+{$API_DOMAIN} {
+	encode zstd gzip
+
+	# Browser hanya boleh memakai HTTPS ke domain ini selama setahun.
+	header Strict-Transport-Security "max-age=31536000"
+
+	reverse_proxy {
+		# Semua instance api (docker compose --scale api=N) dicari lewat DNS
+		# Docker setiap 5 detik, lalu dibagi bergiliran.
+		dynamic a {
+			name api
+			port 8080
+			refresh 5s
+		}
+		lb_policy round_robin
+		# Instance yang tidak bisa dihubungi dilewati selama 30 detik, dan
+		# permintaannya dicoba ke instance lain.
+		lb_retries 2
+		fail_duration 30s
+	}
+
+	log {
+		output stdout
+		format json
+	}
+}

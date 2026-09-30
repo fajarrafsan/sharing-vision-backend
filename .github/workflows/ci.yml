@@ -55,9 +55,27 @@ jobs:
       - name: Build image
         run: docker build -t warta-api .
 
-  scripts:
+  deploy-config:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - name: Periksa skrip backup
         run: shellcheck scripts/*.sh
+      - name: Periksa Caddyfile
+        run: >-
+          docker run --rm -e API_DOMAIN=api.contoh.id -e ACME_EMAIL=admin@contoh.id
+          -v "$PWD/deploy/Caddyfile:/etc/caddy/Caddyfile:ro" caddy:2-alpine
+          caddy validate --config /etc/caddy/Caddyfile
+      - name: Periksa compose production
+        run: docker compose -f docker-compose.yml -f docker-compose.prod.yml config -q
+        env:
+          API_DOMAIN: api.contoh.id
+          MYSQL_ROOT_PASSWORD: contoh
+          DB_PASSWORD: contoh
+          JWT_SECRET: contoh
+          ADMIN_EMAIL: admin@contoh.id
+          ADMIN_PASSWORD: contoh
+          CORS_ORIGINS: https://contoh.id
+          APP_URL: https://contoh.id
+          SMTP_HOST: smtp.contoh.id
+          MAIL_FROM: Warta <noreply@contoh.id>

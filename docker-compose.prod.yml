@@ -5,7 +5,36 @@
 # Semua rahasia wajib diisi lewat .env (lihat .env.example); compose menolak
 # jalan bila ada yang kosong, dan service menolak nilai contoh karena
 # APP_ENV=production.
+#
+# Dari luar server hanya Caddy yang terbuka (port 80 dan 443, HTTPS otomatis).
+# MySQL, Redis, dan api hanya bisa dijangkau di jaringan compose.
 services:
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    depends_on:
+      api:
+        condition: service_healthy
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    environment:
+      API_DOMAIN: ${API_DOMAIN:?isi API_DOMAIN, misalnya api.domainmu.id}
+      # Alamat untuk pemberitahuan Let's Encrypt, misalnya sertifikat gagal
+      # diperbarui.
+      ACME_EMAIL: ${ACME_EMAIL:-${ADMIN_EMAIL}}
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      # Sertifikat disimpan supaya tidak diminta ulang setiap restart.
+      - caddy_data:/data
+      - caddy_config:/config
+    networks:
+      default:
+        # Alamat tetap supaya api bisa mempercayai X-Forwarded-For hanya
+        # dari Caddy (TRUSTED_PROXIES).
+        ipv4_address: ${CADDY_IP:-172.30.0.10}
+
   mysql:
     environment:
       MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?isi MYSQL_ROOT_PASSWORD di .env}
@@ -67,6 +96,9 @@ services:
     depends_on:
       redis:
         condition: service_healthy
+    # Hanya dijangkau lewat Caddy. Tanpa port di host, api juga bisa
+    # dijalankan beberapa instance: --scale api=3.
+    ports: !reset []
     environment:
       APP_ENV: production
       DB_USER: warta
@@ -78,6 +110,21 @@ services:
       APP_URL: ${APP_URL:?isi APP_URL dengan alamat https frontend}
       SMTP_HOST: ${SMTP_HOST:?isi SMTP_HOST supaya email verifikasi dan reset password terkirim}
       MAIL_FROM: ${MAIL_FROM:?isi MAIL_FROM, misalnya Warta <noreply@domainmu.id>}
-      # IP reverse proxy di depan service, misalnya Nginx atau load balancer.
-      TRUSTED_PROXIES: ${TRUSTED_PROXIES:-}
+      # Caddy di depan api. Bila ada proxy lain lagi di depan Caddy (misalnya
+      # Cloudflare), tambahkan rentang IP-nya setelah IP Caddy.
+      TRUSTED_PROXIES: ${TRUSTED_PROXIES:-${CADDY_IP:-172.30.0.10}}
       REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+
+networks:
+  default:
+    ipam:
+      config:
+        # Container lain mendapat IP otomatis dari setengah atas subnet,
+        # jadi CADDY_IP di setengah bawah tidak pernah terambil. Bila subnet
+        # ini bentrok dengan jaringan lain di server, ganti ketiganya.
+        - subnet: ${WARTA_SUBNET:-172.30.0.0/24}
+          ip_range: ${WARTA_IP_RANGE:-172.30.0.128/25}
+
+volumes:
+  caddy_data:
+  caddy_config:

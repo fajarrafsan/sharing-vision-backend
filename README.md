@@ -465,21 +465,43 @@ untuk tautan di email, sitemap, dan RSS.
 ## Menjalankan di production
 
 Pakai `docker-compose.prod.yml` di atas `docker-compose.yml`. Override ini
-menyalakan `APP_ENV=production`, memakai user database sendiri (bukan root),
-menutup port MySQL dari luar server, menyertakan Redis, dan menjalankan
-backup otomatis.
+menyalakan `APP_ENV=production` dan menyusun layanan berikut:
 
-1. Buat `.env` di server, jangan di-commit:
+| Layanan | Isi |
+|---|---|
+| `caddy` | reverse proxy dengan HTTPS otomatis dari Let's Encrypt, satu-satunya yang terbuka ke internet (port 80 dan 443) |
+| `api` | service ini, bisa beberapa instance, hanya dijangkau lewat Caddy |
+| `mysql` | database dengan user `warta` sendiri (bukan root) |
+| `redis` | rate limit dan hitungan dibaca bersama semua instance |
+| `backup` | backup database dan gambar terjadwal |
+
+### Deploy ke server
+
+Yang dibutuhkan: server Linux dengan Docker (RAM 2 GB disarankan; MySQL 8
+sendiri memakai sekitar 400 MB), domain untuk API, dan akun SMTP.
+
+1. **DNS.** Buat record `A` untuk domain API (misalnya `api.domainmu.id`)
+   ke IP server. Buka port 80 dan 443 di firewall; port lain tidak perlu.
+
+2. **Ambil kode** di server:
+
+   ```bash
+   git clone https://github.com/fajarrafsan/warta-backend.git
+   cd warta-backend
+   ```
+
+3. **Buat `.env`** (jangan di-commit). Rahasia acak bisa dibuat dengan
+   `openssl rand -base64 48`:
 
    ```env
+   API_DOMAIN=api.domainmu.id
    MYSQL_ROOT_PASSWORD=<acak>
    DB_PASSWORD=<acak>
-   JWT_SECRET=<hasil: openssl rand -base64 48>
+   JWT_SECRET=<acak>
    ADMIN_EMAIL=admin@domainmu.id
    ADMIN_PASSWORD=<minimal 12 karakter>
-   CORS_ORIGINS=https://domain-frontend-mu.id
-   APP_URL=https://domain-frontend-mu.id
-   TRUSTED_PROXIES=<IP reverse proxy, bila ada>
+   CORS_ORIGINS=https://domainmu.id
+   APP_URL=https://domainmu.id
    SMTP_HOST=smtp.penyedia-email.com
    SMTP_PORT=587
    SMTP_USERNAME=<dari penyedia email>
@@ -487,16 +509,36 @@ backup otomatis.
    MAIL_FROM=Warta <noreply@domainmu.id>
    ```
 
-   SMTP bisa dari penyedia email transaksional mana pun (Brevo, Mailgun,
-   Amazon SES, Resend, dan sejenisnya). Port 465 memakai TLS langsung, port
-   lain memakai STARTTLS. Pastikan domain `MAIL_FROM` sudah diatur SPF dan
-   DKIM-nya di penyedia itu supaya email tidak masuk spam.
+   `CORS_ORIGINS` dan `APP_URL` adalah alamat frontend. SMTP bisa dari
+   penyedia email transaksional mana pun (Brevo, Mailgun, Amazon SES, Resend,
+   dan sejenisnya). Port 465 memakai TLS langsung, port lain STARTTLS.
+   Atur SPF dan DKIM domain `MAIL_FROM` di penyedia itu supaya email tidak
+   masuk spam.
 
-2. Jalankan:
+4. **Jalankan:**
 
    ```bash
-   docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build
+   docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build --wait
    ```
+
+   Pada permintaan pertama, Caddy meminta sertifikat untuk `API_DOMAIN`
+   (butuh beberapa detik) lalu memperbaruinya sendiri sebelum kedaluwarsa.
+   HTTP dialihkan ke HTTPS.
+
+5. **Periksa:**
+
+   ```bash
+   curl https://api.domainmu.id/health/ready
+   # {"database":"terhubung","redis":"terhubung","status":"ok"}
+   ```
+
+6. **Frontend.** Di Vercel, isi `VITE_API_URL=https://api.domainmu.id` lalu
+   redeploy.
+
+7. **Backup ke luar server.** Lihat bagian Backup di bawah.
+
+Memperbarui ke versi terbaru: `git pull` lalu jalankan perintah langkah 4
+lagi. Migrasi database berjalan otomatis saat api menyala.
 
 Compose menolak jalan bila salah satu nilai wajib kosong. Service juga menolak
 menyala dalam mode production bila `JWT_SECRET` masih nilai contoh,
@@ -508,9 +550,18 @@ Image MySQL hanya membuat user dan password saat volume datanya masih kosong.
 Bila volume `warta_mysql_data` sudah pernah dipakai dengan pengaturan lama,
 buat user `warta` secara manual atau mulai dari volume baru.
 
-Yang tetap perlu disiapkan sendiri: HTTPS di reverse proxy, menyalin folder
-backup ke tempat lain (lihat di bawah), dan alamat backend untuk
-`VITE_API_URL` di frontend.
+**IP pengunjung di balik Caddy.** Caddy mendapat alamat tetap
+(`CADDY_IP`, bawaan `172.30.0.10`) di jaringan compose, dan api hanya
+mempercayai `X-Forwarded-For` dari alamat itu. Container lain mendapat IP
+dari setengah atas subnet (`WARTA_IP_RANGE`), jadi alamat Caddy tidak pernah
+terambil. Bila subnet `172.30.0.0/24` bentrok dengan jaringan lain di server,
+ganti `WARTA_SUBNET`, `WARTA_IP_RANGE`, dan `CADDY_IP` bersamaan. Bila ada
+proxy lain di depan Caddy (misalnya Cloudflare), isi `TRUSTED_PROXIES` dengan
+IP Caddy ditambah rentang IP proxy itu.
+
+**Memakai reverse proxy sendiri** (misalnya Nginx yang sudah ada di server):
+matikan layanan `caddy` dengan `--scale caddy=0`, buka port api di
+`docker-compose.prod.yml`, dan isi `TRUSTED_PROXIES` dengan IP proxy itu.
 
 ### Backup
 
@@ -589,9 +640,9 @@ load balancer berhenti mengirim permintaan ke instance yang bermasalah.
 docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --scale api=3
 ```
 
-Dengan beberapa instance, ubah port di `docker-compose.yml` menjadi rentang
-(`"8080-8082:8080"`) atau biarkan reverse proxy menjangkau container lewat
-jaringan compose.
+Caddy menemukan semua instance lewat DNS Docker setiap 5 detik dan membagi
+permintaan bergiliran. Instance yang mati dilewati dan permintaannya dicoba
+ke instance lain, jadi restart satu instance tidak memutus layanan.
 
 ## Catatan
 

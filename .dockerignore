@@ -11,3 +11,4 @@ docker-compose.yml
 uploads
 backups
 scripts
+deploy
